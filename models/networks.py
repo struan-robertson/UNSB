@@ -6,7 +6,7 @@ import functools
 from torch.optim import lr_scheduler
 import numpy as np
 from .stylegan_networks import StyleGAN2Discriminator, StyleGAN2Generator, TileStyleGAN2Discriminator
-from .ncsn_networks import NLayerDiscriminator_ncsn, ResnetGenerator_ncsn
+from .ncsn_networks import NLayerDiscriminator_ncsn, ResnetGenerator_ncsn, StyleExtractor_ncsn
 
 ###############################################################################
 # Helper Functions
@@ -58,7 +58,9 @@ class Downsample(nn.Module):
             else:
                 return self.pad(inp)[:, :, ::self.stride, ::self.stride]
         else:
-            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+            # groups must be the static channel count: a tensor-derived value turns
+            # symbolic under torch.compile, which conv lowering cannot handle
+            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=self.channels)
 
 
 class Upsample2(nn.Module):
@@ -75,7 +77,9 @@ class Upsample(nn.Module):
     def __init__(self, channels, pad_type='repl', filt_size=4, stride=2):
         super(Upsample, self).__init__()
         self.filt_size = filt_size
-        self.filt_odd = np.mod(filt_size, 2) == 1
+        # plain Python bool: a numpy bool_ here reads as a data-dependent
+        # branch under torch.compile(fullgraph=True)
+        self.filt_odd = filt_size % 2 == 1
         self.pad_size = int((filt_size - 1) / 2)
         self.stride = stride
         self.off = int((self.stride - 1) / 2.)
@@ -87,7 +91,7 @@ class Upsample(nn.Module):
         self.pad = get_pad_layer(pad_type)([1, 1, 1, 1])
 
     def forward(self, inp):
-        ret_val = F.conv_transpose2d(self.pad(inp), self.filt, stride=self.stride, padding=1 + self.pad_size, groups=inp.shape[1])[:, :, 1:, 1:]
+        ret_val = F.conv_transpose2d(self.pad(inp), self.filt, stride=self.stride, padding=1 + self.pad_size, groups=self.channels)[:, :, 1:, 1:]
         if(self.filt_odd):
             return ret_val
         else:
@@ -174,7 +178,9 @@ def init_weights(net, init_type='normal', init_gain=0.02, debug=False):
     """
     def init_func(m):  # define the initialization function
         classname = m.__class__.__name__
-        if hasattr(m, 'weight') and (classname.find('Conv') != -1 or classname.find('Linear') != -1):
+        # equalised-lr layers (EqualisedLinear/EqualisedConv2d/Conv2dWeightModulate) hold their
+        # weight in a submodule and self-initialise, so only touch plain Parameter weights
+        if hasattr(m, 'weight') and isinstance(m.weight, torch.nn.Parameter) and (classname.find('Conv') != -1 or classname.find('Linear') != -1):
             if debug:
                 print(classname)
             if init_type == 'normal':
@@ -338,6 +344,16 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % netD)
     return init_net(net, init_type, init_gain, gpu_ids,
                     initialize_weights=('stylegan2' not in netD))
+
+
+def define_SE(input_nc, style_dim, gpu_ids=[], opt=None):
+    """Create a style extractor that recovers the style vector from a generated image.
+
+    Built from equalised-learning-rate layers which self-initialise, so no extra
+    weight initialization is applied.
+    """
+    net = StyleExtractor_ncsn(input_nc, style_dim)
+    return init_net(net, gpu_ids=gpu_ids, initialize_weights=False)
 
 
 ##############################################################################
@@ -575,7 +591,7 @@ class PatchSampleF(nn.Module):
                     #patch_id = torch.randperm(feat_reshape.shape[1], device=feats[0].device)
                     patch_id = np.random.permutation(feat_reshape.shape[1])
                     patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # .to(patch_ids.device)
-                patch_id = torch.tensor(patch_id, dtype=torch.long, device=feat.device)
+                patch_id = torch.as_tensor(patch_id, dtype=torch.long, device=feat.device)
                 x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1])
             else:
                 x_sample = feat_reshape

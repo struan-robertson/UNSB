@@ -267,24 +267,126 @@ def get_timestep_embedding(timesteps, embedding_dim, max_positions=10000):
     assert emb.shape == (timesteps.shape[0], embedding_dim)
     return emb
     
-class AdaptiveLayer(nn.Module):
-    def __init__(self, in_channel, style_dim):
+class EqualisedWeight(nn.Module):
+    """Based on equalised learning rate introduced in the Progressive GAN paper."""
+
+    def __init__(self, shape):
         super().__init__()
 
-        self.style_net = nn.Linear(style_dim, in_channel * 2)
+        # He initialisation constant
+        self.c = 1 / math.sqrt(np.prod(shape[1:]))
 
-        self.style_net.bias.data[:in_channel] = 1
-        self.style_net.bias.data[in_channel:] = 0
+        self.weight = nn.Parameter(torch.randn(shape))
 
-    def forward(self, input, style):
-        
-        style = self.style_net(style).unsqueeze(2).unsqueeze(3)
-        gamma, beta = style.chunk(2, 1)
+    def forward(self):
+        return self.weight * self.c
 
-        out = gamma * input + beta
 
-        return out
-        
+class EqualisedLinear(nn.Module):
+    """Uses learning-rate equalised weights for a linear layer."""
+
+    def __init__(self, in_features, out_features, bias=0.0):
+        super().__init__()
+
+        self.weight = EqualisedWeight([out_features, in_features])
+        self.bias = nn.Parameter(torch.zeros(out_features) + bias)
+
+    def forward(self, x):
+        return F.linear(x, self.weight(), bias=self.bias)
+
+
+class EqualisedConv2d(nn.Module):
+    """Uses learning-rate equalised weights for a convolution layer."""
+
+    def __init__(self, in_features, out_features, kernel_size, stride=1, padding=0):
+        super().__init__()
+
+        self.stride = stride
+        self.padding = padding
+        self.weight = EqualisedWeight([out_features, in_features, kernel_size, kernel_size])
+        self.bias = nn.Parameter(torch.zeros(out_features))
+
+    def forward(self, x):
+        return F.conv2d(x, self.weight(), bias=self.bias, stride=self.stride, padding=self.padding)
+
+
+class Conv2dWeightModulate(nn.Module):
+    """Scales the convolutional weights by the style vector and demodulates by normalising it."""
+
+    def __init__(self, in_features, out_features, kernel_size, s_dim, padding,
+                 use_bias=False, demodulate=True, eps=1e-8):
+        super().__init__()
+
+        self.out_features = out_features
+        self.demodulate = demodulate
+        self.padding = padding
+        self.weight = EqualisedWeight([out_features, in_features, kernel_size, kernel_size])
+        self.eps = eps
+        self.use_bias = use_bias
+
+        # bias=1 so that a zero style vector still yields a usable modulation
+        self.to_style = EqualisedLinear(s_dim, in_features, bias=1)
+
+        if use_bias:
+            self.bias = nn.Parameter(torch.zeros(out_features))
+
+    def forward(self, x, s):
+        b, _, height, width = x.shape
+
+        s = self.to_style(s)
+        s = s[:, None, :, None, None]
+
+        weights = self.weight()[None, :, :, :, :]
+        weights = weights * s
+
+        if self.demodulate:
+            sigma_inv = torch.rsqrt((weights ** 2).sum(dim=(2, 3, 4), keepdim=True) + self.eps)
+            weights = weights * sigma_inv
+
+        x = x.reshape(1, -1, height, width)
+
+        _, _, *ws = weights.shape
+        weights = weights.reshape(b * self.out_features, *ws)
+
+        x = F.conv2d(x, weights, padding=self.padding, groups=b)
+        x = x.reshape(b, self.out_features, x.shape[2], x.shape[3])
+
+        if self.use_bias:
+            x = x + self.bias[None, :, None, None]
+
+        return x
+
+
+class StyleExtractor_ncsn(nn.Module):
+    """Given an image, extract the style vector used to create it."""
+
+    def __init__(self, input_nc, style_dim, ndf=64):
+        super().__init__()
+
+        self.model = nn.Sequential(
+            EqualisedConv2d(input_nc, ndf, kernel_size=4, padding=1),
+            nn.LeakyReLU(0.2, True),
+            Downsample(ndf),
+            EqualisedConv2d(ndf, ndf * 2, kernel_size=4, padding=1),
+            nn.InstanceNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, True),
+            Downsample(ndf * 2),
+            EqualisedConv2d(ndf * 2, ndf * 4, kernel_size=4, padding=1),
+            nn.InstanceNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, True),
+            Downsample(ndf * 4),
+            EqualisedConv2d(ndf * 4, ndf * 8, kernel_size=4, padding=1),
+            nn.InstanceNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            EqualisedLinear(ndf * 8, style_dim),
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+
 class ResnetGenerator_ncsn(nn.Module):
     """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
 
@@ -331,11 +433,12 @@ class ResnetGenerator_ncsn(nn.Module):
                           Downsample(ngf * mult * 2)
                           # nn.AvgPool2d(kernel_size=2, stride=2)
                         ]
+        self.style_dim = opt.style_dim
         self.model_res = nn.ModuleList()
         mult = 2 ** n_downsampling
         for i in range(n_blocks):       # add ResNet blocks
 
-            self.model_res += [ResnetBlock_cond(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias,temb_dim=4*ngf,z_dim=4*ngf)]
+            self.model_res += [ResnetBlock_cond(ngf * mult, padding_type=padding_type, use_dropout=use_dropout, temb_dim=4*ngf, z_dim=self.style_dim)]
 
         model_upsample = []
         for i in range(n_downsampling):  # add upsampling layers
@@ -347,21 +450,17 @@ class ResnetGenerator_ncsn(nn.Module):
             else:
                 model_upsample += [
                     Upsample(ngf * mult),
-                    # nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-                    nn.Conv2d(ngf * mult, int(ngf * mult / 2), kernel_size=3, stride=1, padding=1, bias=use_bias),
-                    norm_layer(int(ngf * mult / 2)),
+                    Conv2dWeightModulate(ngf * mult, int(ngf * mult / 2), kernel_size=3, s_dim=self.style_dim, padding=1),
                     nn.ReLU(True)]
         model_upsample += [nn.ReflectionPad2d(3)]
         model_upsample += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
         model_upsample += [nn.Tanh()]
 
         self.model = nn.Sequential(*model)
-        self.model_upsample = nn.Sequential(*model_upsample)
-        mapping_layers = [PixelNorm(),
-                      nn.Linear(self.ngf*4, self.ngf*4),
-                      nn.LeakyReLU(0.2)]
+        self.model_upsample = nn.ModuleList(model_upsample)
+        mapping_layers = [PixelNorm()]
         for _ in range(opt.n_mlp):
-            mapping_layers.append(nn.Linear(self.ngf*4, self.ngf*4))
+            mapping_layers.append(EqualisedLinear(self.style_dim, self.style_dim))
             mapping_layers.append(nn.LeakyReLU(0.2))
         self.z_transform = nn.Sequential(*mapping_layers)
         modules_emb = []
@@ -375,8 +474,10 @@ class ResnetGenerator_ncsn(nn.Module):
         modules_emb += [nn.LeakyReLU(0.2)]
         self.time_embed = nn.Sequential(*modules_emb)
         
-    def forward(self, x, time_cond,z,layers=[], encode_only=False):
-        z_embed = self.z_transform(z)
+    def forward(self, x, time_cond,z,layers=[], encode_only=False, style_is_mapped=False):
+        # z may be a raw latent (mapped to w here) or an already-mapped w-space
+        # style, e.g. one produced by the style extractor
+        z_embed = z if style_is_mapped else self.z_transform(z)
         # print(z_embed.shape)
         temb = get_timestep_embedding(time_cond, self.ngf)
         time_embed = self.time_embed(temb)
@@ -400,7 +501,11 @@ class ResnetGenerator_ncsn(nn.Module):
             out = self.model(x)
             for layer in self.model_res:
                 out = layer(out,time_embed,z_embed)
-            out = self.model_upsample(out)
+            for layer in self.model_upsample:
+                if isinstance(layer, Conv2dWeightModulate):
+                    out = layer(out, z_embed)
+                else:
+                    out = layer(out)
             return out
 ##################################################################################
 # Basic Blocks
@@ -465,84 +570,53 @@ class ResnetBlock(nn.Module):
         return out
 
 class ResnetBlock_cond(nn.Module):
-    """Define a Resnet block"""
+    """Resnet block conditioned on a timestep embedding (additive) and a style vector (weight modulation)"""
 
-    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias,temb_dim,z_dim):
+    def __init__(self, dim, padding_type, use_dropout, temb_dim, z_dim):
         """Initialize the Resnet block
 
-        A resnet block is a conv block with skip connections
-        We construct a conv block with build_conv_block function,
-        and implement skip connections in <forward> function.
+        A resnet block is a conv block with skip connections. The convolutions are
+        weight-modulated by the style vector (StyleGAN2), so demodulation replaces
+        the explicit normalization layers.
         Original Resnet paper: https://arxiv.org/pdf/1512.03385.pdf
         """
         super(ResnetBlock_cond, self).__init__()
-        self.conv_block,self.adaptive,self.conv_fin = self.build_conv_block(dim, padding_type, norm_layer, use_dropout, use_bias,temb_dim,z_dim)
-
-    def build_conv_block(self, dim, padding_type, norm_layer, use_dropout, use_bias,temb_dim,z_dim):
-        """Construct a convolutional block.
-
-        Parameters:
-            dim (int)           -- the number of channels in the conv layer.
-            padding_type (str)  -- the name of padding layer: reflect | replicate | zero
-            norm_layer          -- normalization layer
-            use_dropout (bool)  -- if use dropout layers.
-            use_bias (bool)     -- if the conv layer uses bias or not
-
-        Returns a conv block (with a conv layer, a normalization layer, and a non-linearity layer (ReLU))
-        """
-        
-        self.conv_block = nn.ModuleList()
-        self.conv_fin = nn.ModuleList()
-        p = 0
-        if padding_type == 'reflect':
-            self.conv_block += [nn.ReflectionPad2d(1)]
-        elif padding_type == 'replicate':
-            self.conv_block += [nn.ReplicationPad2d(1)]
-        elif padding_type == 'zero':
-            p = 1
-        else:
-            raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-        
-        self.conv_block += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias), norm_layer(dim)]
-        self.adaptive = AdaptiveLayer(dim,z_dim) 
-        self.conv_fin += [nn.ReLU(True)]
-        if use_dropout:
-            self.conv_fin += [nn.Dropout(0.5)]
 
         p = 0
         if padding_type == 'reflect':
-            self.conv_fin += [nn.ReflectionPad2d(1)]
+            self.pad = nn.ReflectionPad2d(1)
         elif padding_type == 'replicate':
-            self.conv_fin += [nn.ReplicationPad2d(1)]
+            self.pad = nn.ReplicationPad2d(1)
         elif padding_type == 'zero':
+            self.pad = None
             p = 1
         else:
             raise NotImplementedError('padding [%s] is not implemented' % padding_type)
-        self.conv_fin += [nn.Conv2d(dim, dim, kernel_size=3, padding=p, bias=use_bias), norm_layer(dim)]
-        
+
+        self.conv1 = Conv2dWeightModulate(dim, dim, kernel_size=3, s_dim=z_dim, padding=p)
+        self.conv2 = Conv2dWeightModulate(dim, dim, kernel_size=3, s_dim=z_dim, padding=p)
+        self.act = nn.ReLU(True)
+        self.dropout = nn.Dropout(0.5) if use_dropout else None
+
         self.Dense_time = nn.Linear(temb_dim, dim)
-        # self.Dense_time.weight.data = default_init()(self.Dense_time.weight.data.shape)
         nn.init.zeros_(self.Dense_time.bias)
-        
-        self.style = nn.Linear(z_dim, dim * 2)
-
-        self.style.bias.data[:dim] = 1
-        self.style.bias.data[dim:] = 0
-        
-        return self.conv_block,self.adaptive,self.conv_fin
 
     def forward(self, x,time_cond,z):
-        
+
         time_input = self.Dense_time(time_cond)
-        for n,layer in enumerate(self.conv_block):
-            out = layer(x)
-            if n==0:
-                out += time_input[:, :, None, None]
-        out = self.adaptive(out,z)
-        for layer in self.conv_fin:
-            out = layer(out)
-        """Forward function (with skip connections)"""
-        out = x + out  # add skip connections
+        out = self.pad(x) if self.pad is not None else x
+        out = self.conv1(out, z)
+        out = out + time_input[:, :, None, None]
+        out = self.act(out)
+        if self.dropout is not None:
+            out = self.dropout(out)
+        out = self.pad(out) if self.pad is not None else out
+        out = self.conv2(out, z)
+        # scale the skip connection sum by 1/sqrt(2) (as StyleGAN2 does in its
+        # residual blocks): demodulation keeps the branch at unit variance but
+        # cannot stop the additions compounding — unscaled, 9 blocks grow
+        # activations by ~sqrt(2)^9 and saturate the output tanh from init
+        out = (x + out) / math.sqrt(2)
         return out
 ###############################################################################
 # Helper Functions
@@ -592,7 +666,9 @@ class Downsample(nn.Module):
             else:
                 return self.pad(inp)[:, :, ::self.stride, ::self.stride]
         else:
-            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+            # groups must be the static channel count: a tensor-derived value turns
+            # symbolic under torch.compile, which conv lowering cannot handle
+            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=self.channels)
 
 
 class Upsample2(nn.Module):
@@ -609,7 +685,9 @@ class Upsample(nn.Module):
     def __init__(self, channels, pad_type='repl', filt_size=4, stride=2):
         super(Upsample, self).__init__()
         self.filt_size = filt_size
-        self.filt_odd = np.mod(filt_size, 2) == 1
+        # plain Python bool: a numpy bool_ here reads as a data-dependent
+        # branch under torch.compile(fullgraph=True)
+        self.filt_odd = filt_size % 2 == 1
         self.pad_size = int((filt_size - 1) / 2)
         self.stride = stride
         self.off = int((self.stride - 1) / 2.)
@@ -621,7 +699,7 @@ class Upsample(nn.Module):
         self.pad = get_pad_layer(pad_type)([1, 1, 1, 1])
 
     def forward(self, inp):
-        ret_val = F.conv_transpose2d(self.pad(inp), self.filt, stride=self.stride, padding=1 + self.pad_size, groups=inp.shape[1])[:, :, 1:, 1:]
+        ret_val = F.conv_transpose2d(self.pad(inp), self.filt, stride=self.stride, padding=1 + self.pad_size, groups=self.channels)[:, :, 1:, 1:]
         if(self.filt_odd):
             return ret_val
         else:

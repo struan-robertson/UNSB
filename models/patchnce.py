@@ -1,4 +1,3 @@
-from packaging import version
 import torch
 from torch import nn
 
@@ -8,7 +7,7 @@ class PatchNCELoss(nn.Module):
         super().__init__()
         self.opt = opt
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
-        self.mask_dtype = torch.uint8 if version.parse(torch.__version__) < version.parse('1.2.0') else torch.bool
+        self.mask_dtype = torch.bool
 
     def forward(self, feat_q, feat_k):
         num_patches = feat_q.shape[0]

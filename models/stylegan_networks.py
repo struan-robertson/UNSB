@@ -769,6 +769,11 @@ class StyleGAN2Discriminator(nn.Module):
             if "patch" in self.opt.netD and self.opt.D_patch_size is not None:
                 size = 2 ** int(np.log2(self.opt.D_patch_size))
 
+        # Compute height size for non-square support
+        crop_size_h = getattr(opt, 'crop_size_h', opt.crop_size)
+        load_size_h = getattr(opt, 'load_size_h', opt.load_size)
+        size_h = 2 ** int((np.rint(np.log2(min(load_size_h, crop_size_h)))))
+
         blur_kernel = [1, 3, 3, 1]
         channel_multiplier = ndf / 64
         channels = {
@@ -786,6 +791,7 @@ class StyleGAN2Discriminator(nn.Module):
         convs = [ConvLayer(input_nc, channels[size], 1)]
 
         log_size = int(math.log(size, 2))
+        log_size_h = int(math.log(size_h, 2))
 
         in_channel = channels[size]
 
@@ -804,16 +810,20 @@ class StyleGAN2Discriminator(nn.Module):
 
             in_channel = out_channel
 
-        
+
 
         if False and "tile" in self.opt.netD:
             in_channel += 1
         self.final_conv = ConvLayer(in_channel, channels[4], 3)
+        # Compute final spatial dimensions after all downsampling
+        num_downs = log_size - final_res_log2
+        final_w = size // (2 ** num_downs)
+        final_h = size_h // (2 ** num_downs)
         if "patch" in self.opt.netD:
             self.final_linear = ConvLayer(channels[4], 1, 3, bias=False, activate=False)
         else:
             self.final_linear = nn.Sequential(
-                EqualLinear(channels[4] * 4 * 4, channels[4], activation='fused_lrelu'),
+                EqualLinear(channels[4] * final_h * final_w, channels[4], activation='fused_lrelu'),
                 EqualLinear(channels[4], 1),
             )
         self.t_embed = TimestepEmbedding(
@@ -891,6 +901,7 @@ class StyleGAN2Encoder(nn.Module):
 
         blur_kernel = [1, 3, 3, 1]
 
+        # Use the smaller dimension (width) to determine channel configuration
         cur_res = 2 ** int((np.rint(np.log2(min(opt.load_size, opt.crop_size)))))
         convs = [nn.Identity(),
                  ConvLayer(input_nc, channels[cur_res], 1)]
@@ -947,6 +958,7 @@ class StyleGAN2Decoder(nn.Module):
         }
         inject_noise= None
         num_downsampling = self.opt.stylegan2_G_num_downsampling
+        # Use the smaller dimension (width) to determine channel configuration
         cur_res = 2 ** int((np.rint(np.log2(min(opt.load_size, opt.crop_size))))) // (2 ** num_downsampling)
         convs = []
         conv_init = nn.ModuleList() 

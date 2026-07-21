@@ -4,6 +4,7 @@ from util import util
 import torch
 import models
 import data
+from options.config import load_config_values
 
 
 class BaseOptions():
@@ -23,6 +24,7 @@ class BaseOptions():
     def initialize(self, parser):
         """Define the common options that are used in both training and test."""
         # basic parameters
+        parser.add_argument('--config', type=str, default=None, help='path to a TOML config file (default: ./config.toml if it exists); explicit CLI flags override the file')
         parser.add_argument('--dataroot', default='placeholder', help='path to images (should have subfolders trainA, trainB, valA, valB, etc)')
         parser.add_argument('--name', type=str, default='experiment_name', help='name of the experiment. It decides where to store samples and models')
         parser.add_argument('--easy_label', type=str, default='experiment_name', help='Interpretable name')
@@ -41,7 +43,7 @@ class BaseOptions():
         parser.add_argument('--netG', type=str, default='resnet_9blocks_cond', choices=['resnet_9blocks', 'resnet_6blocks', 'unet_256', 'unet_128', 'stylegan2', 'smallstylegan2', 'resnet_cat'], help='specify generator architecture')
         parser.add_argument('--embedding_type', type=str, default='positional', choices=['fourier', 'positional'], help='specify generator architecture')
         parser.add_argument('--n_layers_D', type=int, default=3, help='only used if netD==n_layers')
-        parser.add_argument('--style_dim', type=int, default=512, help='only used if netD==n_layers')
+        parser.add_argument('--style_dim', type=int, default=6, help='dimensionality of the style vector z injected into the generator via weight modulation')
         parser.add_argument('--n_mlp', type=int, default=3, help='only used if netD==n_layers')
         parser.add_argument('--normG', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for G')
         parser.add_argument('--normD', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for D')
@@ -50,6 +52,13 @@ class BaseOptions():
         parser.add_argument('--no_dropout', type=util.str2bool, nargs='?', const=True, default=True)
         parser.add_argument('--std', type=float, default=0.25, help='Scale of Gaussian noise added to data')
         parser.add_argument('--tau', type=float, default=0.01, help='Entropy parameter')
+        # performance parameters
+        parser.add_argument('--mixed_precision', type=util.str2bool, nargs='?', const=True, default=False, help='run forward passes under torch.amp autocast in bfloat16 (needs a bf16-capable GPU: Ampere+ / RDNA3+)')
+        parser.add_argument('--compile', type=util.str2bool, nargs='?', const=True, default=False, help='optimise the networks with torch.compile (the first iterations are slow while kernels compile)')
+        # evaluation parameters (KID/FID via clean-fid, see util/evaluation.py)
+        parser.add_argument('--n_evaluation_images', type=int, default=10000, help='number of translations to generate for FID/KID computation')
+        parser.add_argument('--cond_is_n_evaluation_images', type=int, default=100, help='style-varied translations per val shoeprint for the conditional inception score (0 disables CIS in evaluate.py)')
+        parser.add_argument('--use_training_data', type=util.str2bool, nargs='?', const=True, default=False, help='FID/KID from the train splits: translate train A and score against all of train B (the one_to_many_gan test_kid_fid.py convention) instead of val/val')
         parser.add_argument('--no_antialias', action='store_true', help='if specified, use stride=2 convs instead of antialiased-downsampling (sad)')
         parser.add_argument('--no_antialias_up', action='store_true', help='if specified, use [upconv(learned filter)] instead of [upconv(hard-coded [1,3,3,1] filter), conv]')
         # dataset parameters
@@ -58,8 +67,10 @@ class BaseOptions():
         parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
         parser.add_argument('--num_threads', default=4, type=int, help='# threads for loading data')
         parser.add_argument('--batch_size', type=int, default=1, help='input batch size')
-        parser.add_argument('--load_size', type=int, default=286, help='scale images to this size')
-        parser.add_argument('--crop_size', type=int, default=256, help='then crop to this size')
+        parser.add_argument('--load_size', type=int, default=286, help='scale images to this size (width)')
+        parser.add_argument('--load_size_h', type=int, default=None, help='scale images to this height (default: same as load_size)')
+        parser.add_argument('--crop_size', type=int, default=256, help='then crop to this size (width)')
+        parser.add_argument('--crop_size_h', type=int, default=None, help='crop to this height (default: same as crop_size)')
         parser.add_argument('--max_dataset_size', type=int, default=float("inf"), help='Maximum number of samples allowed per dataset. If the dataset directory contains more than max_dataset_size, only a subset is loaded.')
         parser.add_argument('--preprocess', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop | crop | scale_width | scale_width_and_crop | none]')
         parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
@@ -89,6 +100,14 @@ class BaseOptions():
             parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
             parser = self.initialize(parser)
 
+        # load the TOML config (if any); its values override the built-in defaults,
+        # and explicit command-line flags override the file
+        config_values = load_config_values(self.cmd_line, is_train=self.isTrain)
+        # apply the model/dataset selectors early so the matching option hooks run below
+        early = {k: config_values[k] for k in ('model', 'dataset_mode', 'mode') if k in config_values}
+        if early:
+            parser.set_defaults(**early)
+
         # get the basic options
         if self.cmd_line is None:
             opt, _ = parser.parse_known_args()
@@ -108,6 +127,14 @@ class BaseOptions():
         dataset_name = opt.dataset_mode
         dataset_option_setter = data.get_option_setter(dataset_name)
         parser = dataset_option_setter(parser, self.isTrain)
+
+        # now that every option is registered, validate and apply the config file
+        if config_values:
+            known_dests = {action.dest for action in parser._actions}
+            unknown = sorted(set(config_values) - known_dests)
+            if unknown:
+                parser.error('unknown option(s) in config file: %s' % ', '.join(unknown))
+            parser.set_defaults(**config_values)
 
         # save and return the parser
         self.parser = parser
@@ -154,6 +181,12 @@ class BaseOptions():
         if opt.suffix:
             suffix = ('_' + opt.suffix.format(**vars(opt))) if opt.suffix != '' else ''
             opt.name = opt.name + suffix
+
+        # Default height options to width options if not specified
+        if opt.load_size_h is None:
+            opt.load_size_h = opt.load_size
+        if opt.crop_size_h is None:
+            opt.crop_size_h = opt.crop_size
 
         self.print_options(opt)
 

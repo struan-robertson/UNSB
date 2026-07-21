@@ -7,7 +7,17 @@ import numpy as np
 import torch.utils.data as data
 from PIL import Image
 import torchvision.transforms as transforms
+from torchvision.transforms import InterpolationMode
 from abc import ABC, abstractmethod
+
+# torchvision transforms take an InterpolationMode while direct PIL resizes
+# take a Resampling filter; keep one source of truth and map between them
+_PIL_RESAMPLE = {
+    InterpolationMode.NEAREST: Image.Resampling.NEAREST,
+    InterpolationMode.BILINEAR: Image.Resampling.BILINEAR,
+    InterpolationMode.BICUBIC: Image.Resampling.BICUBIC,
+    InterpolationMode.LANCZOS: Image.Resampling.LANCZOS,
+}
 
 
 class BaseDataset(data.Dataset, ABC):
@@ -65,30 +75,35 @@ def get_params(opt, size):
     w, h = size
     new_h = h
     new_w = w
+    load_size_h = getattr(opt, 'load_size_h', opt.load_size)
+    crop_size_h = getattr(opt, 'crop_size_h', opt.crop_size)
     if opt.preprocess == 'resize_and_crop':
-        new_h = new_w = opt.load_size
+        new_w = opt.load_size
+        new_h = load_size_h
     elif opt.preprocess == 'scale_width_and_crop':
         new_w = opt.load_size
         new_h = opt.load_size * h // w
 
     x = random.randint(0, np.maximum(0, new_w - opt.crop_size))
-    y = random.randint(0, np.maximum(0, new_h - opt.crop_size))
+    y = random.randint(0, np.maximum(0, new_h - crop_size_h))
 
     flip = random.random() > 0.5
 
     return {'crop_pos': (x, y), 'flip': flip}
 
 
-def get_transform(opt, params=None, grayscale=False, method=Image.BICUBIC, convert=True):
+def get_transform(opt, params=None, grayscale=False, method=InterpolationMode.BICUBIC, convert=True):
     transform_list = []
+    load_size_h = getattr(opt, 'load_size_h', opt.load_size)
+    crop_size_h = getattr(opt, 'crop_size_h', opt.crop_size)
     if grayscale:
         transform_list.append(transforms.Grayscale(1))
     if 'fixsize' in opt.preprocess:
         transform_list.append(transforms.Resize(params["size"], method))
     if 'resize' in opt.preprocess:
-        osize = [opt.load_size, opt.load_size]
+        osize = [load_size_h, opt.load_size]
         if "gta2cityscapes" in opt.dataroot:
-            osize[0] = opt.load_size // 2
+            osize[0] = load_size_h // 2
         transform_list.append(transforms.Resize(osize, method))
     elif 'scale_width' in opt.preprocess:
         transform_list.append(transforms.Lambda(lambda img: __scale_width(img, opt.load_size, opt.crop_size, method)))
@@ -102,10 +117,11 @@ def get_transform(opt, params=None, grayscale=False, method=Image.BICUBIC, conve
             transform_list.append(transforms.Lambda(lambda img: __random_zoom(img, opt.load_size, opt.crop_size, method, factor=params["scale_factor"])))
 
     if 'crop' in opt.preprocess:
+        crop_size = (crop_size_h, opt.crop_size)
         if params is None or 'crop_pos' not in params:
-            transform_list.append(transforms.RandomCrop(opt.crop_size))
+            transform_list.append(transforms.RandomCrop(crop_size))
         else:
-            transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], opt.crop_size)))
+            transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], crop_size)))
 
     if 'patch' in opt.preprocess:
         transform_list.append(transforms.Lambda(lambda img: __patch(img, params['patch_index'], opt.crop_size)))
@@ -131,17 +147,17 @@ def get_transform(opt, params=None, grayscale=False, method=Image.BICUBIC, conve
     return transforms.Compose(transform_list)
 
 
-def __make_power_2(img, base, method=Image.BICUBIC):
+def __make_power_2(img, base, method=InterpolationMode.BICUBIC):
     ow, oh = img.size
     h = int(round(oh / base) * base)
     w = int(round(ow / base) * base)
     if h == oh and w == ow:
         return img
 
-    return img.resize((w, h), method)
+    return img.resize((w, h), _PIL_RESAMPLE[method])
 
 
-def __random_zoom(img, target_width, crop_width, method=Image.BICUBIC, factor=None):
+def __random_zoom(img, target_width, crop_width, method=InterpolationMode.BICUBIC, factor=None):
     if factor is None:
         zoom_level = np.random.uniform(0.8, 1.0, size=[2])
     else:
@@ -149,18 +165,18 @@ def __random_zoom(img, target_width, crop_width, method=Image.BICUBIC, factor=No
     iw, ih = img.size
     zoomw = max(crop_width, iw * zoom_level[0])
     zoomh = max(crop_width, ih * zoom_level[1])
-    img = img.resize((int(round(zoomw)), int(round(zoomh))), method)
+    img = img.resize((int(round(zoomw)), int(round(zoomh))), _PIL_RESAMPLE[method])
     return img
 
 
-def __scale_shortside(img, target_width, crop_width, method=Image.BICUBIC):
+def __scale_shortside(img, target_width, crop_width, method=InterpolationMode.BICUBIC):
     ow, oh = img.size
     shortside = min(ow, oh)
     if shortside >= target_width:
         return img
     else:
         scale = target_width / shortside
-        return img.resize((round(ow * scale), round(oh * scale)), method)
+        return img.resize((round(ow * scale), round(oh * scale)), _PIL_RESAMPLE[method])
 
 
 def __trim(img, trim_width):
@@ -180,19 +196,22 @@ def __trim(img, trim_width):
     return img.crop((xstart, ystart, xend, yend))
 
 
-def __scale_width(img, target_width, crop_width, method=Image.BICUBIC):
+def __scale_width(img, target_width, crop_width, method=InterpolationMode.BICUBIC):
     ow, oh = img.size
     if ow == target_width and oh >= crop_width:
         return img
     w = target_width
     h = int(max(target_width * oh / ow, crop_width))
-    return img.resize((w, h), method)
+    return img.resize((w, h), _PIL_RESAMPLE[method])
 
 
 def __crop(img, pos, size):
     ow, oh = img.size
     x1, y1 = pos
-    tw = th = size
+    if isinstance(size, (tuple, list)):
+        th, tw = size
+    else:
+        tw = th = size
     if (ow > tw or oh > th):
         return img.crop((x1, y1, x1 + tw, y1 + th))
     return img
@@ -216,7 +235,7 @@ def __patch(img, index, size):
 
 def __flip(img, flip):
     if flip:
-        return img.transpose(Image.FLIP_LEFT_RIGHT)
+        return img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     return img
 
 

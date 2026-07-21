@@ -1,0 +1,5 @@
+/.agent-shell/
+__pycache__/
+*.pyc
+/checkpoints
+/results/

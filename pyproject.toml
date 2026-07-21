@@ -1,0 +1,41 @@
+[project]
+name = "unsb"
+version = "0.1.0"
+description = "Unpaired Neural Schrödinger Bridge with style-vector one-to-many translation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "clean-fid==0.1.35", # pinned to the version used by one_to_many_gan for comparable scores
+    "scipy<1.17",        # clean-fid uses sqrtm(disp=...), removed in scipy 1.17+
+    "numpy>=2.2.3",
+    "pillow>=9.1",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "pytorch-triton-rocm>=3.5.1 ; sys_platform == 'linux'",
+    "triton-rocm>=3.6.0 ; sys_platform == 'linux'",        
+    "tqdm",
+]
+
+[tool.uv]
+# flat script-style repo (train.py/test.py at the root); nothing to build or install
+package = false
+
+# pull torch/torchvision from the PyTorch ROCm index instead of the CUDA wheels on PyPI
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+pytorch-triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+triton-rocm = [
+  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true

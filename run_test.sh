@@ -1,1 +1,1 @@
-python test.py --dataroot ./datasets/horse2zebra --name h2z_SB --checkpoints_dir ./checkpoints --mode SB --eval --phase test --num_test 120 --gpu_ids 0
+python test.py --config config.toml --eval

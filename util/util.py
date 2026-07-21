@@ -1,5 +1,4 @@
 """This module contains simple helper functions """
-from __future__ import print_function
 import torch
 import numpy as np
 from PIL import Image
@@ -49,8 +48,8 @@ def tensor2im(input_image, imtype=np.uint8):
         imtype (type)        --  the desired type of the converted numpy array
     """
     if not isinstance(input_image, np.ndarray):
-        if isinstance(input_image, torch.Tensor):  # get the data from a variable
-            image_tensor = input_image.data
+        if isinstance(input_image, torch.Tensor):
+            image_tensor = input_image.detach()
         else:
             return input_image
         image_numpy = image_tensor[0].clamp(-1.0, 1.0).cpu().float().numpy()  # convert it into a numpy array
@@ -95,9 +94,9 @@ def save_image(image_numpy, image_path, aspect_ratio=1.0):
     if aspect_ratio is None:
         pass
     elif aspect_ratio > 1.0:
-        image_pil = image_pil.resize((h, int(w * aspect_ratio)), Image.BICUBIC)
+        image_pil = image_pil.resize((h, int(w * aspect_ratio)), Image.Resampling.BICUBIC)
     elif aspect_ratio < 1.0:
-        image_pil = image_pil.resize((int(h / aspect_ratio), w), Image.BICUBIC)
+        image_pil = image_pil.resize((int(h / aspect_ratio), w), Image.Resampling.BICUBIC)
     image_pil.save(image_path)
 
 
@@ -148,19 +147,19 @@ def correct_resize_label(t, size):
         one_t = t[i, :1]
         one_np = np.transpose(one_t.numpy().astype(np.uint8), (1, 2, 0))
         one_np = one_np[:, :, 0]
-        one_image = Image.fromarray(one_np).resize(size, Image.NEAREST)
+        one_image = Image.fromarray(one_np).resize(size, Image.Resampling.NEAREST)
         resized_t = torch.from_numpy(np.array(one_image)).long()
         resized.append(resized_t)
     return torch.stack(resized, dim=0).to(device)
 
 
-def correct_resize(t, size, mode=Image.BICUBIC):
+def correct_resize(t, size, mode=Image.Resampling.BICUBIC):
     device = t.device
     t = t.detach().cpu()
     resized = []
     for i in range(t.size(0)):
         one_t = t[i:i + 1]
-        one_image = Image.fromarray(tensor2im(one_t)).resize(size, Image.BICUBIC)
+        one_image = Image.fromarray(tensor2im(one_t)).resize(size, Image.Resampling.BICUBIC)
         resized_t = torchvision.transforms.functional.to_tensor(one_image) * 2 - 1.0
         resized.append(resized_t)
     return torch.stack(resized, dim=0).to(device)

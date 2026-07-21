@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 from .base_model import BaseModel
 from . import networks
 from .patchnce import PatchNCELoss
@@ -10,11 +11,14 @@ class SBModel(BaseModel):
     def modify_commandline_options(parser, is_train=True):
         """  Configures options specific for SB model
         """
-        parser.add_argument('--mode', type=str, default="sb", choices='(FastCUT, fastcut, sb)')
+        parser.add_argument('--mode', type=str, default="sb", help='training mode: FastCUT | fastcut | sb (case-insensitive)')
 
         parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss：GAN(G(X))')
         parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
         parser.add_argument('--lambda_SB', type=float, default=0.1, help='weight for SB loss')
+        parser.add_argument('--lambda_style', type=float, default=5.0, help='weight for the style cycle (latent regression) loss that keeps the generator responsive to the style vector')
+        parser.add_argument('--style_cos_l2_ratio', type=float, default=0.2, help='weight of the L2 term relative to the cosine term in the style cycle loss')
+        parser.add_argument('--mapping_lr_ratio', type=float, default=0.01, help='learning rate of the style mapping network relative to the generator (StyleGAN-style 100x reduction)')
         parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
         parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
         parser.add_argument('--nce_includes_all_negatives_from_minibatch',
@@ -51,7 +55,7 @@ class SBModel(BaseModel):
 
         # specify the training losses you want to print out.
         # The training/test scripts will call <BaseModel.get_current_losses>
-        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE','SB']
+        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE','SB','style']
         self.visual_names = ['real_A','real_A_noisy', 'fake_B', 'real_B']
         if self.opt.phase == 'test':
             self.visual_names = ['real']
@@ -65,7 +69,7 @@ class SBModel(BaseModel):
             self.visual_names += ['idt_B']
 
         if self.isTrain:
-            self.model_names = ['G', 'F', 'D','E']
+            self.model_names = ['G', 'F', 'D','E','SE']
         else:  # during test time, only load G
             self.model_names = ['G']
 
@@ -77,6 +81,7 @@ class SBModel(BaseModel):
             self.netD = networks.define_D(opt.output_nc, opt.ndf, opt.netD, opt.n_layers_D, opt.normD, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
             self.netE = networks.define_D(opt.output_nc*4, opt.ndf, opt.netD, opt.n_layers_D, opt.normD,
                                           opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
+            self.netSE = networks.define_SE(opt.output_nc, opt.style_dim, self.gpu_ids, opt)
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)
             self.criterionNCE = []
@@ -85,12 +90,23 @@ class SBModel(BaseModel):
                 self.criterionNCE.append(PatchNCELoss(opt).to(self.device))
 
             self.criterionIdt = torch.nn.L1Loss().to(self.device)
-            self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
+            # the mapping network trains far slower than the rest of the generator
+            # (as in StyleGAN and one_to_many_gan) so it cannot chase degenerate
+            # solutions of the style losses
+            mapping_params = list(self.netG.z_transform.parameters())
+            mapping_param_ids = {id(p) for p in mapping_params}
+            other_params = [p for p in self.netG.parameters() if id(p) not in mapping_param_ids]
+            self.optimizer_G = torch.optim.Adam(
+                [{'params': other_params},
+                 {'params': mapping_params, 'lr': opt.lr * opt.mapping_lr_ratio}],
+                lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizer_E = torch.optim.Adam(self.netE.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
+            self.optimizer_SE = torch.optim.Adam(self.netSE.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
             self.optimizers.append(self.optimizer_E)
+            self.optimizers.append(self.optimizer_SE)
             
     def data_dependent_initialize(self, data,data2):
         """
@@ -114,37 +130,46 @@ class SBModel(BaseModel):
                 self.optimizers.append(self.optimizer_F)
 
     def optimize_parameters(self):
-        # forward
-        self.forward()
+        # forward and loss computations run under autocast (a no-op unless
+        # --mixed_precision); backward and optimizer steps stay outside, as
+        # torch.amp prescribes
+        with self.autocast():
+            self.forward()
         self.netG.train()
         self.netE.train()
         self.netD.train()
         self.netF.train()
+        self.netSE.train()
         # update D
         self.set_requires_grad(self.netD, True)
         self.optimizer_D.zero_grad()
-        self.loss_D = self.compute_D_loss()
+        with self.autocast():
+            self.loss_D = self.compute_D_loss()
         self.loss_D.backward()
         self.optimizer_D.step()
-        
+
         self.set_requires_grad(self.netE, True)
         self.optimizer_E.zero_grad()
-        self.loss_E = self.compute_E_loss()
+        with self.autocast():
+            self.loss_E = self.compute_E_loss()
         self.loss_E.backward()
         self.optimizer_E.step()
-        
+
         # update G
         self.set_requires_grad(self.netD, False)
         self.set_requires_grad(self.netE, False)
-        
+
         self.optimizer_G.zero_grad()
+        self.optimizer_SE.zero_grad()
         if self.opt.netF == 'mlp_sample':
             self.optimizer_F.zero_grad()
-        self.loss_G = self.compute_G_loss()
+        with self.autocast():
+            self.loss_G = self.compute_G_loss()
         self.loss_G.backward()
         self.optimizer_G.step()
+        self.optimizer_SE.step()
         if self.opt.netF == 'mlp_sample':
-            self.optimizer_F.step()       
+            self.optimizer_F.step()
         
     def set_input(self, input,input2=None):
 
@@ -171,13 +196,28 @@ class SBModel(BaseModel):
         times = times / times[-1]
         times = 0.5 * times[-1] + 0.5 * times
         times = np.concatenate([np.zeros(1),times])
-        times = torch.tensor(times).float().cuda()
+        times = torch.tensor(times, dtype=torch.float32, device=self.device)
         self.times = times
         bs =  self.real_A.size(0)
-        time_idx = (torch.randint(T, size=[1]).cuda() * torch.ones(size=[1]).cuda()).long()
+        time_idx = torch.randint(T, size=[1], device=self.device).long()
         self.time_idx = time_idx
         self.timestep     = times[time_idx]
-        
+
+        # one style per sample, held fixed across the whole trajectory so the
+        # style cycle loss can tie the final output back to it. Styles are
+        # sampled in z space but mapped to w space immediately: w is the style
+        # actually applied to the image, so the style extractor and cycle loss
+        # operate there (the mapping network is just the sampler of the space)
+        map_style = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
+        self.style = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+        style2     = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+        # the identity branch reconstructs real_B in its own style, so extract it
+        # rather than sampling one; this also trains netSE on real images
+        if self.opt.isTrain and self.opt.nce_idt:
+            styleB = self.netSE(self.real_B)
+        else:
+            styleB = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+
         with torch.no_grad():
             self.netG.eval()
             for t in range(self.time_idx.int().item()+1):
@@ -190,30 +230,27 @@ class SBModel(BaseModel):
                 Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
-                z        = torch.randn(size=[self.real_A.shape[0],4*self.opt.ngf]).to(self.real_A.device)
-                Xt_1     = self.netG(Xt, time_idx, z)
-                
+                Xt_1     = self.netG(Xt, time_idx, self.style, style_is_mapped=True)
+
                 Xt2       = self.real_A2 if (t == 0) else (1-inter) * Xt2 + inter * Xt_12.detach() + (scale * tau).sqrt() * torch.randn_like(Xt2).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
-                z        = torch.randn(size=[self.real_A.shape[0],4*self.opt.ngf]).to(self.real_A.device)
-                Xt_12    = self.netG(Xt2, time_idx, z)
-                
-                
+                Xt_12    = self.netG(Xt2, time_idx, style2, style_is_mapped=True)
+
+
                 if self.opt.nce_idt:
                     XtB = self.real_B if (t == 0) else (1-inter) * XtB + inter * Xt_1B.detach() + (scale * tau).sqrt() * torch.randn_like(XtB).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
-                    z        = torch.randn(size=[self.real_A.shape[0],4*self.opt.ngf]).to(self.real_A.device)
-                    Xt_1B = self.netG(XtB, time_idx, z)
+                    Xt_1B = self.netG(XtB, time_idx, styleB, style_is_mapped=True)
             if self.opt.nce_idt:
                 self.XtB = XtB.detach()
             self.real_A_noisy = Xt.detach()
             self.real_A_noisy2 = Xt2.detach()
                       
         
-        z_in    = torch.randn(size=[2*bs,4*self.opt.ngf]).to(self.real_A.device)
-        z_in2    = torch.randn(size=[bs,4*self.opt.ngf]).to(self.real_A.device)
+        z_in    = torch.cat([self.style, styleB], dim=0) if self.opt.nce_idt and self.opt.isTrain else self.style
+        z_in2   = style2
         """Run forward pass"""
         self.real = torch.cat((self.real_A, self.real_B), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A
         
@@ -225,8 +262,8 @@ class SBModel(BaseModel):
                 self.real = torch.flip(self.real, [3])
                 self.realt = torch.flip(self.realt, [3])
         
-        self.fake = self.netG(self.realt,self.time_idx,z_in)
-        self.fake_B2 =  self.netG(self.real_A_noisy2,self.time_idx,z_in2)
+        self.fake = self.netG(self.realt,self.time_idx,z_in, style_is_mapped=True)
+        self.fake_B2 =  self.netG(self.real_A_noisy2,self.time_idx,z_in2, style_is_mapped=True)
         self.fake_B = self.fake[:self.real_A.size(0)]
         if self.opt.nce_idt:
             self.idt_B = self.fake[self.real_A.size(0):]
@@ -239,17 +276,29 @@ class SBModel(BaseModel):
             times = times / times[-1]
             times = 0.5 * times[-1] + 0.5 * times
             times = np.concatenate([np.zeros(1),times])
-            times = torch.tensor(times).float().cuda()
+            times = torch.tensor(times, dtype=torch.float32, device=self.device)
             self.times = times
             bs =  self.real.size(0)
-            time_idx = (torch.randint(T, size=[1]).cuda() * torch.ones(size=[1]).cuda()).long()
+            time_idx = torch.randint(T, size=[1], device=self.device).long()
             self.time_idx = time_idx
             self.timestep     = times[time_idx]
             visuals = []
             with torch.no_grad():
                 self.netG.eval()
+                # one style for the whole trajectory; use set_style() to control it,
+                # otherwise a fresh style is sampled per forward pass
+                if getattr(self, 'fixed_style', None) is not None:
+                    z = self.fixed_style.to(self.real_A.device)
+                    if z.dim() == 1:
+                        z = z[None, :]
+                    z = z.expand(self.real_A.shape[0], -1)
+                else:
+                    z = torch.randn(size=[self.real_A.shape[0], self.opt.style_dim]).to(self.real_A.device)
+                map_style = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
+                z = map_style(z)
+                self.style = z
                 for t in range(self.opt.num_timesteps):
-                    
+
                     if t > 0:
                         delta = times[t] - times[t-1]
                         denom = times[-1] - times[t-1]
@@ -258,10 +307,14 @@ class SBModel(BaseModel):
                     Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
-                    z        = torch.randn(size=[self.real_A.shape[0],4*self.opt.ngf]).to(self.real_A.device)
-                    Xt_1     = self.netG(Xt, time_idx, z)
-                    
+                    Xt_1     = self.netG(Xt, time_idx, z, style_is_mapped=True)
+
                     setattr(self, "fake_"+str(t+1), Xt_1)
+
+    def set_style(self, style):
+        """Fix the z-space style vector used at test time ([style_dim] or [bs, style_dim]);
+        it is passed through the mapping network internally. Pass None to sample randomly per image."""
+        self.fixed_style = style
                     
     def compute_D_loss(self):
         """Calculate GAN loss for the discriminator"""
@@ -323,14 +376,30 @@ class SBModel(BaseModel):
             loss_NCE_both = (self.loss_NCE + self.loss_NCE_Y) * 0.5
         else:
             loss_NCE_both = self.loss_NCE
-        
-        self.loss_G = self.loss_G_GAN + self.opt.lambda_SB*self.loss_SB + self.opt.lambda_NCE*loss_NCE_both
+
+        if self.opt.lambda_style > 0.0:
+            reconstructed_style = self.netSE(self.fake_B)
+            # detach the target: otherwise the mapping network can zero this loss
+            # by collapsing all z to one w instead of the generator imprinting styles
+            self.loss_style = self.calculate_style_cycle_loss(self.style.detach(), reconstructed_style) * self.opt.lambda_style
+        else:
+            self.loss_style = 0.0
+
+        self.loss_G = self.loss_G_GAN + self.opt.lambda_SB*self.loss_SB + self.opt.lambda_NCE*loss_NCE_both + self.loss_style
         return self.loss_G
+
+    def calculate_style_cycle_loss(self, original_s, reconstructed_s):
+        """Cycle consistency loss between the injected style and the style recovered from the generated image"""
+        norm_original_s = F.normalize(original_s, dim=-1)
+        norm_reconstructed_s = F.normalize(reconstructed_s, dim=-1)
+        cos_loss = 1 - F.cosine_similarity(norm_original_s, norm_reconstructed_s, dim=-1).mean()
+        l2_loss = F.mse_loss(original_s, reconstructed_s)
+        return cos_loss + self.opt.style_cos_l2_ratio * l2_loss
 
 
     def calculate_NCE_loss(self, src, tgt):
         n_layers = len(self.nce_layers)
-        z    = torch.randn(size=[self.real_A.size(0),4*self.opt.ngf]).to(self.real_A.device)
+        z    = torch.randn(size=[self.real_A.size(0),self.opt.style_dim]).to(self.real_A.device)
         feat_q = self.netG(tgt, self.time_idx*0, z, self.nce_layers, encode_only=True)
 
         if self.opt.flip_equivariance and self.flipped_for_equivariance:
