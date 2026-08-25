@@ -7,6 +7,15 @@ implementation of Kim et al. (ICLR 2024) and extended with style conditioning
 by weight modulation, a decoupled bridge-noise multiplier, and the evaluation
 and analysis tooling described below.
 
+## Installation
+
+Choose the build of torch that matches the card:
+
+```sh
+uv sync --extra cuda
+uv sync --extra rocm
+```
+
 ## Configuration
 
 Options resolve as defaults, then a TOML configuration file, then command-line
