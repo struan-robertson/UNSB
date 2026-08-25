@@ -85,7 +85,7 @@ def sb_translate(netG, x, opt, style=None, style_is_mapped=False, return_steps=F
         style = torch.randn(x.shape[0], opt.style_dim, device=device)
 
     Xt = x
-    Xt_1 = x
+    x1_hat = x
     steps = []
     autocast = torch.autocast(device.type, dtype=torch.bfloat16,
                               enabled=opt.mixed_precision and device.type == 'cuda')
@@ -96,13 +96,13 @@ def sb_translate(netG, x, opt, style=None, style_is_mapped=False, return_steps=F
                 denom = times[-1] - times[t - 1]
                 inter = (delta / denom).reshape(-1, 1, 1, 1)
                 scale = (delta * (1 - delta / denom)).reshape(-1, 1, 1, 1)
-                Xt = (1 - inter) * Xt + inter * Xt_1 + noise * (scale * tau).sqrt() * torch.randn_like(Xt)
+                Xt = (1 - inter) * Xt + inter * x1_hat + noise * (scale * tau).sqrt() * torch.randn_like(Xt)
             time_idx = (t * torch.ones(x.shape[0], device=device)).long()
-            Xt_1 = netG(Xt, time_idx, style, style_is_mapped=style_is_mapped)
+            x1_hat = netG(Xt, time_idx, style, style_is_mapped=style_is_mapped)
             if return_steps:
-                steps.append(Xt_1.float())
+                steps.append(x1_hat.float())
     # back to fp32 so callers can stack the result with real (fp32) images
-    return steps if return_steps else Xt_1.float()
+    return steps if return_steps else x1_hat.float()
 
 
 def _val_dataloader(opt):

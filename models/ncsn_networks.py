@@ -462,6 +462,9 @@ class ResnetGenerator_ncsn(nn.Module):
         for _ in range(opt.n_mlp):
             mapping_layers.append(EqualisedLinear(self.style_dim, self.style_dim))
             mapping_layers.append(nn.LeakyReLU(0.2))
+        # Maps a sampled style w to the modulation style s. Named z_transform
+        # rather than w_to_s because the name is a state_dict key: renaming it
+        # would orphan every trained checkpoint
         self.z_transform = nn.Sequential(*mapping_layers)
         modules_emb = []
         modules_emb += [nn.Linear(self.ngf,self.ngf*4)]

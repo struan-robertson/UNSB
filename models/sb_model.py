@@ -57,7 +57,7 @@ class SBModel(BaseModel):
         # specify the training losses you want to print out.
         # The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE','SB','style']
-        self.visual_names = ['real_A','real_A_noisy', 'fake_B', 'real_B']
+        self.visual_names = ['real_A','x_t', 'fake_B', 'real_B']
         if self.opt.phase == 'test':
             self.visual_names = ['real']
             for NFE in range(self.opt.num_timesteps):
@@ -215,15 +215,15 @@ class SBModel(BaseModel):
         # sampled in z space but mapped to w space immediately: w is the style
         # actually applied to the image, so the style extractor and cycle loss
         # operate there (the mapping network is just the sampler of the space)
-        map_style = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
-        self.style = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
-        style2     = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+        w_to_s = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
+        self.s = w_to_s(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+        s2     = w_to_s(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
         # the identity branch reconstructs real_B in its own style, so extract it
         # rather than sampling one; this also trains netSE on real images
         if self.opt.isTrain and self.opt.nce_idt:
-            styleB = self.netSE(self.real_B)
+            s_B = self.netSE(self.real_B)
         else:
-            styleB = map_style(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
+            s_B = w_to_s(torch.randn(size=[bs, self.opt.style_dim]).to(self.real_A.device))
 
         with torch.no_grad():
             self.netG.eval()
@@ -234,34 +234,34 @@ class SBModel(BaseModel):
                     denom = times[-1] - times[t-1]
                     inter = (delta / denom).reshape(-1,1,1,1)
                     scale = (delta * (1 - delta / denom)).reshape(-1,1,1,1)
-                Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
+                Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * x1_hat.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
-                Xt_1     = self.netG(Xt, time_idx, self.style, style_is_mapped=True)
+                x1_hat     = self.netG(Xt, time_idx, self.s, style_is_mapped=True)
 
                 Xt2       = self.real_A2 if (t == 0) else (1-inter) * Xt2 + inter * Xt_12.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt2).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
-                Xt_12    = self.netG(Xt2, time_idx, style2, style_is_mapped=True)
+                Xt_12    = self.netG(Xt2, time_idx, s2, style_is_mapped=True)
 
 
                 if self.opt.nce_idt:
-                    XtB = self.real_B if (t == 0) else (1-inter) * XtB + inter * Xt_1B.detach() + noise * (scale * tau).sqrt() * torch.randn_like(XtB).to(self.real_A.device)
+                    XtB = self.real_B if (t == 0) else (1-inter) * XtB + inter * x1_hat_B.detach() + noise * (scale * tau).sqrt() * torch.randn_like(XtB).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
-                    Xt_1B = self.netG(XtB, time_idx, styleB, style_is_mapped=True)
+                    x1_hat_B = self.netG(XtB, time_idx, s_B, style_is_mapped=True)
             if self.opt.nce_idt:
                 self.XtB = XtB.detach()
-            self.real_A_noisy = Xt.detach()
-            self.real_A_noisy2 = Xt2.detach()
+            self.x_t = Xt.detach()
+            self.x_t2 = Xt2.detach()
                       
         
-        z_in    = torch.cat([self.style, styleB], dim=0) if self.opt.nce_idt and self.opt.isTrain else self.style
-        z_in2   = style2
+        s_in    = torch.cat([self.s, s_B], dim=0) if self.opt.nce_idt and self.opt.isTrain else self.s
+        s_in2   = s2
         """Run forward pass"""
         self.real = torch.cat((self.real_A, self.real_B), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A
         
-        self.realt = torch.cat((self.real_A_noisy, self.XtB), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A_noisy
+        self.realt = torch.cat((self.x_t, self.XtB), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.x_t
         
         if self.opt.flip_equivariance:
             self.flipped_for_equivariance = self.opt.isTrain and (np.random.random() < 0.5)
@@ -269,8 +269,8 @@ class SBModel(BaseModel):
                 self.real = torch.flip(self.real, [3])
                 self.realt = torch.flip(self.realt, [3])
         
-        self.fake = self.netG(self.realt,self.time_idx,z_in, style_is_mapped=True)
-        self.fake_B2 =  self.netG(self.real_A_noisy2,self.time_idx,z_in2, style_is_mapped=True)
+        self.fake = self.netG(self.realt,self.time_idx,s_in, style_is_mapped=True)
+        self.fake_B2 =  self.netG(self.x_t2,self.time_idx,s_in2, style_is_mapped=True)
         self.fake_B = self.fake[:self.real_A.size(0)]
         if self.opt.nce_idt:
             self.idt_B = self.fake[self.real_A.size(0):]
@@ -302,9 +302,9 @@ class SBModel(BaseModel):
                     z = z.expand(self.real_A.shape[0], -1)
                 else:
                     z = torch.randn(size=[self.real_A.shape[0], self.opt.style_dim]).to(self.real_A.device)
-                map_style = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
-                z = map_style(z)
-                self.style = z
+                w_to_s = (self.netG.module if isinstance(self.netG, torch.nn.DataParallel) else self.netG).z_transform
+                z = w_to_s(z)
+                self.s = z
                 for t in range(self.opt.num_timesteps):
 
                     if t > 0:
@@ -312,12 +312,12 @@ class SBModel(BaseModel):
                         denom = times[-1] - times[t-1]
                         inter = (delta / denom).reshape(-1,1,1,1)
                         scale = (delta * (1 - delta / denom)).reshape(-1,1,1,1)
-                    Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
+                    Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * x1_hat.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
-                    Xt_1     = self.netG(Xt, time_idx, z, style_is_mapped=True)
+                    x1_hat     = self.netG(Xt, time_idx, z, style_is_mapped=True)
 
-                    setattr(self, "fake_"+str(t+1), Xt_1)
+                    setattr(self, "fake_"+str(t+1), x1_hat)
 
     def set_style(self, style):
         """Fix the z-space style vector used at test time ([style_dim] or [bs, style_dim]);
@@ -345,8 +345,8 @@ class SBModel(BaseModel):
         
         """Calculate GAN loss for the discriminator"""
         
-        XtXt_1 = torch.cat([self.real_A_noisy,self.fake_B.detach()], dim=1)
-        XtXt_2 = torch.cat([self.real_A_noisy2,self.fake_B2.detach()], dim=1)
+        XtXt_1 = torch.cat([self.x_t,self.fake_B.detach()], dim=1)
+        XtXt_2 = torch.cat([self.x_t2,self.fake_B2.detach()], dim=1)
         temp = torch.logsumexp(self.netE(XtXt_1, self.time_idx, XtXt_2).reshape(-1), dim=0).mean()
         self.loss_E = -self.netE(XtXt_1, self.time_idx, XtXt_1).mean() +temp + temp**2
         
@@ -366,14 +366,14 @@ class SBModel(BaseModel):
             self.loss_G_GAN = 0.0
         self.loss_SB = 0
         if self.opt.lambda_SB > 0.0:
-            XtXt_1 = torch.cat([self.real_A_noisy, self.fake_B], dim=1)
-            XtXt_2 = torch.cat([self.real_A_noisy2, self.fake_B2], dim=1)
+            XtXt_1 = torch.cat([self.x_t, self.fake_B], dim=1)
+            XtXt_2 = torch.cat([self.x_t2, self.fake_B2], dim=1)
             
             bs = self.opt.batch_size
 
             ET_XY    = self.netE(XtXt_1, self.time_idx, XtXt_1).mean() - torch.logsumexp(self.netE(XtXt_1, self.time_idx, XtXt_2).reshape(-1), dim=0)
             self.loss_SB = -(self.opt.num_timesteps-self.time_idx[0])/self.opt.num_timesteps*self.opt.tau*ET_XY
-            self.loss_SB += self.opt.tau*torch.mean((self.real_A_noisy-self.fake_B)**2)
+            self.loss_SB += self.opt.tau*torch.mean((self.x_t-self.fake_B)**2)
         if self.opt.lambda_NCE > 0.0:
             self.loss_NCE = self.calculate_NCE_loss(self.real_A, fake)
         else:
@@ -390,7 +390,7 @@ class SBModel(BaseModel):
             reconstructed_style = self.netSE(self.fake_B)
             # detach the target: otherwise the mapping network can zero this loss
             # by collapsing all z to one w instead of the generator imprinting styles
-            self.loss_style = self.calculate_style_cycle_loss(self.style.detach(), reconstructed_style) * self.opt.lambda_style
+            self.loss_style = self.calculate_style_cycle_loss(self.s.detach(), reconstructed_style) * self.opt.lambda_style
         else:
             self.loss_style = 0.0
 
