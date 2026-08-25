@@ -9,33 +9,47 @@ dependencies = [
     "scipy<1.17",        # clean-fid uses sqrtm(disp=...), removed in scipy 1.17+
     "numpy>=2.2.3",
     "pillow>=9.1",
+    "tqdm",
+    "impression-tools",
+]
+
+# Pick the build of torch that matches the card. CUDA is the default choice:
+#     uv sync --extra cuda
+#     uv sync --extra rocm
+[project.optional-dependencies]
+cuda = [
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+]
+rocm = [
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "pytorch-triton-rocm>=3.5.1 ; sys_platform == 'linux'",
     "triton-rocm>=3.6.0 ; sys_platform == 'linux'",
-    "tqdm",
-    "impression-tools",
 ]
 
 [tool.uv]
 # flat script-style repo (train.py/test.py at the root); nothing to build or install
 package = false
+conflicts = [[{ extra = "cuda" }, { extra = "rocm" }]]
 
-# pull torch/torchvision from the PyTorch ROCm index instead of the CUDA wheels on PyPI
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cuda", extra = "cuda" },
+  { index = "pytorch-rocm", extra = "rocm" },
 ]
 torchvision = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cuda", extra = "cuda" },
+  { index = "pytorch-rocm", extra = "rocm" },
 ]
-pytorch-triton-rocm = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
-triton-rocm = [
-  { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
-]
+pytorch-triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
+triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
 impression-tools = { path = "../../impression_tools", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-rocm"
