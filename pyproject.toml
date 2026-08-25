@@ -12,8 +12,9 @@ dependencies = [
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "pytorch-triton-rocm>=3.5.1 ; sys_platform == 'linux'",
-    "triton-rocm>=3.6.0 ; sys_platform == 'linux'",        
+    "triton-rocm>=3.6.0 ; sys_platform == 'linux'",
     "tqdm",
+    "impression-tools",
 ]
 
 [tool.uv]
@@ -34,6 +35,7 @@ pytorch-triton-rocm = [
 triton-rocm = [
   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
 ]
+impression-tools = { path = "../../impression_tools", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-rocm"

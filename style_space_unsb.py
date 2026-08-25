@@ -32,6 +32,7 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 from models.ncsn_networks import Conv2dWeightModulate  # noqa: E402
 from models.networks import define_SE  # noqa: E402
+from impression_tools.geometry import knn_pairs, lpips_pairs, morans_i, random_pairs
 from unsb_handler import GeneratorHandler, load_unsb_opt  # noqa: E402
 from util.evaluation import sb_translate  # noqa: E402
 
@@ -203,38 +204,8 @@ def sign_structure(s):
 
 
 @torch.no_grad()
-def lpips_pairs(lp, imgs, pairs, device, batch=256):
-    out = []
-    for start in range(0, len(pairs), batch):
-        p = pairs[start:start + batch]
-        a = imgs[p[:, 0]].to(device).repeat(1, 3, 1, 1)
-        b = imgs[p[:, 1]].to(device).repeat(1, 3, 1, 1)
-        out.append(lp(a, b).flatten().cpu().numpy())
-    return np.concatenate(out)
 
 
-def morans_i(values, coords, k, rng, n_perm=999):
-    from sklearn.neighbors import NearestNeighbors
-    idx = NearestNeighbors(n_neighbors=k + 1).fit(coords).kneighbors(coords, return_distance=False)[:, 1:]
-
-    def stat(v):
-        z = v - v.mean()
-        return float((z * z[idx].sum(axis=1)).sum() / (k * (z ** 2).sum()))
-
-    obs = stat(values)
-    null = np.array([stat(rng.permutation(values)) for _ in range(n_perm)])
-    return obs, float((1 + (null >= obs).sum()) / (1 + n_perm))
-
-
-def knn_pairs(coords, k):
-    from sklearn.neighbors import NearestNeighbors
-    idx = NearestNeighbors(n_neighbors=k + 1).fit(coords).kneighbors(coords, return_distance=False)[:, 1:]
-    return np.stack([np.repeat(np.arange(len(coords)), k), idx.reshape(-1)], axis=1)
-
-
-def random_pairs(n, count, rng):
-    p = rng.integers(0, n, size=(int(count * 1.3), 2))
-    return p[p[:, 0] != p[:, 1]][:count]
 
 
 def smoothness(lp, small, coords_by_space, coverage, contrast, device, rng):

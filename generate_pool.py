@@ -26,16 +26,10 @@ Run from the siamese venv (it has both backends importable):
 """
 import argparse
 import sys
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-import torchvision
-from PIL import Image
-from tqdm import tqdm
+from impression_tools.pool import find_prints, generate_pool, outstanding
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unsb_handler import GeneratorHandler, load_unsb_opt
@@ -52,7 +46,6 @@ OUT_DIRS = {
     'gan': Path('~/Extra/Doctorate/synthetic/Shoemarks_GAN/train'),
     'munit': Path('~/Extra/Doctorate/synthetic/Shoemarks_MUNIT/train'),
 }
-BATCH = 16
 
 
 def build_handler(backend, device, config=None):
@@ -72,28 +65,7 @@ def build_handler(backend, device, config=None):
     return GanHandler(load_gan_config(config or GAN_CONFIG), device)
 
 
-def get_id(path):
-    """Class id of a shoeprint file (the siamese datasets.get_id convention)."""
-    split = path.stem.split('_')
-    if len(split) == 3:
-        split = split[:-1]
-    return '_'.join(split)
 
-
-def save_mark(fake, out):
-    """Atomic save: resume-by-existence must never trust a half-written file."""
-    tmp = out.with_name(out.name + '.tmp')
-    torchvision.utils.save_image(fake * 0.5 + 0.5, tmp, format='png')
-    tmp.rename(out)
-
-
-def load_print(path):
-    img = Image.open(path).convert('L')
-    x = torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0)[None]
-    if x.shape[-2:] != (512, 256):
-        x = F.interpolate(x[None], (512, 256), mode='bicubic', align_corners=False,
-                          antialias=True)[0].clamp(0, 1)
-    return x
 
 
 def main():
@@ -129,19 +101,11 @@ def main():
         out_root = out_root.with_name('%s_d%g' % (out_root.name, args.difficulty))
 
     print_dir = args.print_dir.expanduser()
-    classes = defaultdict(list)
-    for f in sorted(print_dir.rglob('*.png')) + sorted(print_dir.rglob('*.jpg')):
-        classes[get_id(f)].append(f)
+    classes = find_prints(print_dir)
     print('%d classes, %d marks each -> %d images -> %s'
           % (len(classes), args.n_styles, len(classes) * args.n_styles, out_root))
 
-    # one flat work list, batched across classes for GPU efficiency
-    todo = []
-    for cid, prints in sorted(classes.items()):
-        for k in range(args.n_styles):
-            out = out_root / cid / ('%d.png' % k)
-            if not out.exists():
-                todo.append((prints[k % len(prints)], out))
+    todo = outstanding(classes, out_root, args.n_styles)
     print('%d images to generate (%d already on disk)'
           % (len(todo), len(classes) * args.n_styles - len(todo)))
     if not todo:
@@ -160,24 +124,7 @@ def main():
         styles = {cid: torch.randn(handler.opt.style_dim, generator=g)
                   for cid in sorted(classes)}
 
-    # preload every needed print into RAM (~0.8 GB for the full set): each one
-    # is reused ~N times, so decoding it once keeps the loop off the CPU
-    prints = {p: load_print(p) for p in
-              tqdm({p for p, _ in todo}, desc='loading prints', unit='img')}
-
-    torch.manual_seed(0)
-    # PNG encoding dominates the remaining CPU work: hand the saves to a small
-    # thread pool so generating the next batch overlaps with writing this one
-    with torch.no_grad(), ThreadPoolExecutor(max_workers=4) as saver:
-        for i in tqdm(range(0, len(todo), BATCH), desc='generating', unit='batch'):
-            chunk = todo[i:i + BATCH]
-            src = torch.stack([prints[p] for p, _ in chunk]).to(device)
-            z = (torch.stack([styles[out.parent.name] for _, out in chunk]).to(device)
-                 if styles else None)  # style=None: fresh style per image
-            fakes = handler.generate(src, style=z, difficulty=args.difficulty).cpu()
-            for fake, (_, out) in zip(fakes, chunk):
-                out.parent.mkdir(parents=True, exist_ok=True)
-                saver.submit(save_mark, fake, out)
+    generate_pool(handler, todo, device, difficulty=args.difficulty, styles=styles)
 
 
 if __name__ == '__main__':

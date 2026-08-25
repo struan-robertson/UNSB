@@ -187,7 +187,7 @@ def validate_kid_fid(netG, opt, device, frozen_style=False):
     """
     # imported here so the siamese pipeline can import sb_translate without
     # the evaluation-only dependencies (clean-fid, scipy)
-    from cleanfid import fid
+    from impression_tools.metrics import compute_fid_kid
 
     generation_dir = Path(opt.checkpoints_dir) / opt.name / 'generated'
     shutil.rmtree(generation_dir, ignore_errors=True)
@@ -240,20 +240,7 @@ def validate_kid_fid(netG, opt, device, frozen_style=False):
     gc.collect()
     torch.cuda.empty_cache()
 
-    # num_workers=0: cleanfid's ResizeDataset holds a closure that cannot be pickled,
-    # which crashes multiprocessing workers under Python 3.14's forkserver default
-    fid_score = fid.compute_fid(str(generation_dir), str(reference_dir), verbose=False, device=device,
-                                use_dataparallel=False, num_workers=0)
-    # cleanfid's KID estimator draws its random subsets from numpy's global RNG;
-    # seed (and restore) it so the estimate is deterministic like everything else
-    np_state = np.random.get_state()
-    np.random.seed(0)
-    try:
-        kid_score = fid.compute_kid(str(generation_dir), str(reference_dir), verbose=False, device=device,
-                                    use_dataparallel=False, num_workers=0)
-    finally:
-        np.random.set_state(np_state)
-    return fid_score, kid_score
+    return compute_fid_kid(generation_dir, reference_dir, device)
 
 
 def validate_cis(netG, opt, device, frozen_style=False):
@@ -269,6 +256,7 @@ def validate_cis(netG, opt, device, frozen_style=False):
     """
     # lazy for the same reason as the clean-fid import in validate_kid_fid
     from scipy.stats import entropy
+    from impression_tools.metrics import inception_probabilities
     from torchvision.models.inception import inception_v3
 
     val_opt = util.copyconf(opt, isTrain=False, phase='val', serial_batches=True, no_flip=True)
@@ -293,11 +281,7 @@ def validate_cis(netG, opt, device, frozen_style=False):
                 z = torch.randn(1, opt.style_dim, device=device).expand(batch, -1)
             for _ in range(math.ceil(n_images / batch)):
                 fakes = sb_translate(netG, sources, opt, style=z)  # random style per sample unless frozen
-                fakes = F.interpolate(fakes, (299, 299), mode='bicubic',
-                                      align_corners=False, antialias=True)
-                fakes = fakes.expand(-1, 3, -1, -1)
-                fakes = (fakes - fakes.min()) / (fakes.max() - fakes.min() + 1e-14)
-                preds.append(F.softmax(inception(fakes), dim=1).cpu().numpy())
+                preds.append(inception_probabilities(fakes, inception))
             preds = np.concatenate(preds)[:n_images]
             marginal = preds.mean(axis=0)
             kls = [entropy(conditional, marginal) for conditional in preds]
