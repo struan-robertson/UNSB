@@ -16,6 +16,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--save_latest_freq', type=int, default=5000, help='frequency of saving the latest results')
         parser.add_argument('--save_epoch_freq', type=int, default=5, help='frequency of saving checkpoints at the end of epochs')
         parser.add_argument('--evaluation_freq', type=int, default=5000, help='evaluation freq')
+        parser.add_argument('--no_train_eval', action='store_true', help='disable the train-time FID/KID hook (checkpoints can be scored afterwards with evaluate.py --epoch all)')
         parser.add_argument('--save_by_iter', action='store_true', help='whether saves model by iteration')
         parser.add_argument('--continue_train', action='store_true', help='continue training: load the latest model')
         parser.add_argument('--epoch_count', type=int, default=1, help='the starting epoch count, we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>, ...')
@@ -23,8 +24,10 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--pretrained_name', type=str, default=None, help='resume training from another checkpoint')
 
         # training parameters
-        parser.add_argument('--n_epochs', type=int, default=200, help='number of epochs with the initial learning rate')
-        parser.add_argument('--n_epochs_decay', type=int, default=200, help='number of epochs to linearly decay learning rate to zero')
+        parser.add_argument('--seed', type=int, default=0, help='random seed for weight init, data order and style/noise sampling; makes runs comparable, not bitwise reproducible (bf16/cudnn/compile nondeterminism remains)')
+        parser.add_argument('--diffaug_policy', type=str, default='', help="DiffAugment policy for discriminator inputs, comma-separated from [color | translation | cutout], e.g. 'color,translation,cutout'; '' disables. Reals and fakes are augmented before netD in both the D and G losses")
+        parser.add_argument('--n_epochs', type=int, default=400, help='total number of training epochs')
+        parser.add_argument('--n_epochs_decay', type=int, default=200, help='the final number of epochs over which the learning rate linearly decays to zero (the first n_epochs - n_epochs_decay epochs run at the initial rate)')
         parser.add_argument('--beta1', type=float, default=0.5, help='momentum term of adam')
         parser.add_argument('--beta2', type=float, default=0.999, help='momentum term of adam')
         parser.add_argument('--lr', type=float, default=0.0002, help='initial learning rate for adam')

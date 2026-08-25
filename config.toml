@@ -7,7 +7,8 @@
 # Run with:  uv run train.py   /   uv run test.py
 
 [experiment]
-name = "shoeprint_unsb"
+name = "shoeprint_unsb_v2" # v1 = 100-epoch run (best: epoch 55, FID 32.19); v2 tests a
+                           # short schedule decaying into the productive window
 checkpoints_dir = "./checkpoints"
 gpu_ids = "0" # e.g. "0", "0,1", "-1" for CPU
 
@@ -28,7 +29,10 @@ lambda_SB = 0.1
 lambda_style = 5.0        # style cycle (latent regression) loss weight
 style_cos_l2_ratio = 0.2  # L2 term weight relative to cosine in the style cycle loss
 mapping_lr_ratio = 0.01   # mapping network LR relative to the generator (100x lower, as in one_to_many_gan)
-tau = 0.01                # SB entropy parameter
+tau = 0.01                # SB entropy parameter: scales the bridge noise AND both SB loss
+                          # terms, so tau = 0 silently removes the SB loss as well
+bridge_noise = 1.0        # multiplier on the bridge noise alone; 0 gives a deterministic
+                          # bridge with the SB loss intact. Must match at train and test time
 
 [data]
 # two-directory layout shared with the one_to_many_gan project:
@@ -53,19 +57,28 @@ use_training_data = true    # translate train A and score against all of train B
                             # against the 135-image val/ set is biased sharply upward)
 
 [training] # applied only by train.py
+seed = 0 # seeds weight init, data order and style/noise sampling (run comparability)
+diffaug_policy = "" # DiffAugment on discriminator inputs, comma-separated from
+                    # [color | translation | cutout]; "" disables. For the small-data
+                    # D-memorisation experiment use "color,translation,cutout"
 lr = 2e-4
 beta1 = 0.5
 beta2 = 0.999
-n_epochs = 50         # epochs at the initial learning rate
-n_epochs_decay = 50   # epochs over which the learning rate decays to zero
-save_epoch_freq = 5
+n_epochs = 60         # total training epochs
+n_epochs_decay = 30   # final epochs over which the learning rate decays to zero
+                      # (the first n_epochs - n_epochs_decay epochs run at the full rate)
+save_epoch_freq = 2   # dense saves: checkpoints are cheap, the post-hoc seeded sweep
+                      # (evaluate.py --epoch all) makes scoring them cheap too
 save_latest_freq = 5000
 print_freq = 100      # loss-log frequency (iterations)
 display_freq = 400    # sample-image-grid frequency (iterations)
 evaluation_freq = 10000 # KID/FID frequency (iterations); 0 disables the train-time hook
+no_train_eval = true    # skip the train-time FID/KID hook entirely; score the saved
+                        # checkpoints afterwards with evaluate.py --epoch all
 
-[test] # applied only by test.py
+[test] # applied only by test.py (and inference via unsb_handler.py)
 phase = "test"
-epoch = "latest" # which checkpoint to load
+epoch = "54" # which checkpoint to load: the full-model winner (seed 0, FID 32.45),
+             # used as the generator in the siamese pipeline
 results_dir = "./results/"
 num_test = 50

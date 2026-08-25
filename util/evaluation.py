@@ -20,9 +20,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision
-from cleanfid import fid
-from scipy.stats import entropy
-from torchvision.models.inception import inception_v3
 from tqdm import trange
 
 import util.util as util
@@ -66,14 +63,17 @@ def training_state_offloaded(model):
             state[key] = state[key].to(device)
 
 
-def sb_translate(netG, x, opt, style=None, style_is_mapped=False):
+def sb_translate(netG, x, opt, style=None, style_is_mapped=False, return_steps=False):
     """Run the full NFE inference loop of the Schrödinger bridge for a batch.
 
     Mirrors the test-phase loop in sb_model.py: one style vector per sample is
-    held fixed across all timesteps. Returns the final translated batch.
+    held fixed across all timesteps. Returns the final translated batch, or the
+    output of every timestep when return_steps is set (for the NFE figure).
     """
     device = x.device
     tau = opt.tau
+    # decoupled noise multiplier; must match the value the model was trained with
+    noise = getattr(opt, 'bridge_noise', 1.0)
     T = opt.num_timesteps
     incs = [0.0] + [1 / (i + 1) for i in range(T - 1)]
     times = torch.tensor(incs, dtype=torch.float32, device=device).cumsum(0)
@@ -86,6 +86,7 @@ def sb_translate(netG, x, opt, style=None, style_is_mapped=False):
 
     Xt = x
     Xt_1 = x
+    steps = []
     autocast = torch.autocast(device.type, dtype=torch.bfloat16,
                               enabled=opt.mixed_precision and device.type == 'cuda')
     with autocast:
@@ -95,11 +96,13 @@ def sb_translate(netG, x, opt, style=None, style_is_mapped=False):
                 denom = times[-1] - times[t - 1]
                 inter = (delta / denom).reshape(-1, 1, 1, 1)
                 scale = (delta * (1 - delta / denom)).reshape(-1, 1, 1, 1)
-                Xt = (1 - inter) * Xt + inter * Xt_1 + (scale * tau).sqrt() * torch.randn_like(Xt)
+                Xt = (1 - inter) * Xt + inter * Xt_1 + noise * (scale * tau).sqrt() * torch.randn_like(Xt)
             time_idx = (t * torch.ones(x.shape[0], device=device)).long()
             Xt_1 = netG(Xt, time_idx, style, style_is_mapped=style_is_mapped)
+            if return_steps:
+                steps.append(Xt_1.float())
     # back to fp32 so callers can stack the result with real (fp32) images
-    return Xt_1.float()
+    return steps if return_steps else Xt_1.float()
 
 
 def _val_dataloader(opt):
@@ -177,11 +180,15 @@ def create_image_checkpoints(netG, netSE, opt, device, tag):
                                          nrow=3, padding=2, normalize=True)
 
 
-def validate_kid_fid(netG, opt, device):
+def validate_kid_fid(netG, opt, device, frozen_style=False):
     """Generate n_evaluation_images translations and score them with clean-fid.
 
     Returns (fid_score, kid_score).
     """
+    # imported here so the siamese pipeline can import sb_translate without
+    # the evaluation-only dependencies (clean-fid, scipy)
+    from cleanfid import fid
+
     generation_dir = Path(opt.checkpoints_dir) / opt.name / 'generated'
     shutil.rmtree(generation_dir, ignore_errors=True)
     generation_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +197,14 @@ def validate_kid_fid(netG, opt, device):
 
     dataloader = _val_dataloader(opt)
     data_iter = iter(dataloader)
+    # frozen_style: one style per source shoeprint, reused every time the loader
+    # cycles, so only the bridge trajectory varies between renders of a print.
+    # The loader is unshuffled, so position in the pass identifies the print.
+    styles = pos = None
+    if frozen_style:
+        styles = torch.randn(len(dataloader.dataset), opt.style_dim,
+                             generator=torch.Generator().manual_seed(0))
+        pos = 0
 
     netG.eval()
     count = 0
@@ -208,7 +223,12 @@ def validate_kid_fid(netG, opt, device):
                 except StopIteration:  # cycle the val set; each pass draws new styles
                     data_iter = iter(dataloader)
                     data = next(data_iter)
-                fakes = sb_translate(netG, data['A'].to(device), opt)
+                a = data['A'].to(device)
+                z = None
+                if frozen_style:
+                    z = styles[pos:pos + a.shape[0]].to(device)
+                    pos = (pos + a.shape[0]) % len(styles)
+                fakes = sb_translate(netG, a, opt, style=z)
                 for fake in fakes:
                     if count >= opt.n_evaluation_images:
                         break
@@ -236,7 +256,7 @@ def validate_kid_fid(netG, opt, device):
     return fid_score, kid_score
 
 
-def validate_cis(netG, opt, device):
+def validate_cis(netG, opt, device, frozen_style=False):
     """Conditional Inception Score, mirroring the one_to_many_gan's test_cis.py.
 
     Each of the first (up to) 100 val shoeprints is translated
@@ -247,6 +267,10 @@ def validate_cis(netG, opt, device):
     replicated to 3 channels, min-max normalised per generation batch, no
     ImageNet normalisation — so scores are comparable between the two projects.
     """
+    # lazy for the same reason as the clean-fid import in validate_kid_fid
+    from scipy.stats import entropy
+    from torchvision.models.inception import inception_v3
+
     val_opt = util.copyconf(opt, isTrain=False, phase='val', serial_batches=True, no_flip=True)
     dataset = TwoDirDataset(val_opt)
     n_sources = min(100, dataset.A_size)  # the GAN scores one 100-image val batch
@@ -264,8 +288,11 @@ def validate_cis(netG, opt, device):
             source = dataset[i]['A'].unsqueeze(0).to(device)
             sources = source.expand(batch, -1, -1, -1)
             preds = []
+            z = None
+            if frozen_style:  # one style for every render of this shoeprint
+                z = torch.randn(1, opt.style_dim, device=device).expand(batch, -1)
             for _ in range(math.ceil(n_images / batch)):
-                fakes = sb_translate(netG, sources, opt)  # a fresh random style per sample
+                fakes = sb_translate(netG, sources, opt, style=z)  # random style per sample unless frozen
                 fakes = F.interpolate(fakes, (299, 299), mode='bicubic',
                                       align_corners=False, antialias=True)
                 fakes = fakes.expand(-1, 3, -1, -1)

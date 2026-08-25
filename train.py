@@ -1,5 +1,8 @@
+import random
 import time
 
+import numpy as np
+import torch
 from tqdm import tqdm
 
 from options.train_options import TrainOptions
@@ -10,6 +13,14 @@ from util.visualizer import Visualizer
 
 def main():
     opt = TrainOptions().parse()   # get training options
+
+    # seed before the datasets and model are built so weight init, shuffle order
+    # and the dataloader workers (seeded per-worker from the torch RNG) all
+    # derive from opt.seed
+    random.seed(opt.seed)
+    np.random.seed(opt.seed)
+    torch.manual_seed(opt.seed)
+
     dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
     dataset2 = create_dataset(opt)
     dataset_size = len(dataset)    # get the number of images in the dataset.
@@ -19,7 +30,7 @@ def main():
     visualizer = Visualizer(opt)   # logs losses and saves sample image grids
 
     total_iters = 0                # the total number of training iterations
-    n_epochs_total = opt.n_epochs + opt.n_epochs_decay
+    n_epochs_total = opt.n_epochs
     start_epoch = opt.epoch_count
 
     if opt.continue_train:
@@ -74,7 +85,7 @@ def main():
                 # position cannot be restored), so point the state at the epoch start
                 model.save_training_state(epoch, epoch_start_iters, suffix=save_suffix)
 
-            if opt.evaluation_freq > 0 and total_iters % opt.evaluation_freq < batch_size:
+            if not opt.no_train_eval and opt.evaluation_freq > 0 and total_iters % opt.evaluation_freq < batch_size:
                 from util.evaluation import validate_kid_fid, training_state_offloaded, create_image_checkpoints, record_metrics
                 create_image_checkpoints(model.netG, model.netSE, opt, model.device, 'iter%08d' % total_iters)
                 with training_state_offloaded(model):

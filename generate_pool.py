@@ -1,0 +1,184 @@
+"""Pre-generate a pool of N synthetic shoemarks per shoeprint class.
+
+Replaces in-loop generation in the siamese pipeline: marks are generated once
+here and streamed from disk by the siamese StreamingDataset (UNSB's 5-NFE
+sampling is too slow in-loop, and the GAN row is pooled identically for
+consistency). Pick N per run with style_coverage.py on the run's selected
+checkpoint (fixed coverage criterion, per-run N).
+
+Backends: 'unsb' loads checkpoint [experiment].name + [test].epoch from the
+UNSB config_no_noise.toml (the adopted deterministic bridge); 'gan' loads
+[inference].checkpoint from the one_to_many_gan config.toml — set each to the
+best-FID checkpoint before running.
+
+Layout: <out-dir>/<class_id>/<k>.png, one directory per shoeprint class,
+matching the class ids of the siamese dataset (get_id convention). Classes
+with several print images rotate through them. Images are saved in [0, 1]
+(white background); the siamese pipeline maps them back to the generator's
+[-1, 1] when substituting them for in-loop generation. Seeded and idempotent:
+existing files are kept, so an interrupted run resumes where it left off.
+
+Run from the siamese venv (it has both backends importable):
+
+    cd ~/Development/Doctorate/siamese && uv run python \
+        ~/Development/Doctorate/diffusion/UNSB/generate_pool.py \
+        --backend unsb --n-styles 32
+"""
+import argparse
+import sys
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torchvision
+from PIL import Image
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from unsb_handler import GeneratorHandler, load_unsb_opt
+
+PRINT_DIR = Path('~/Vault/University/Doctorate/Data/Siamese/Compiled/Shoeprints/train').expanduser()
+GAN_CONFIG = Path('/home/struan/Development/Doctorate/one_to_many_gan/implementation/config.toml')
+# the adopted bridge is deterministic, so that is the default; bridge_noise must
+# match training, and the stochastic ablations need an explicit config.toml
+UNSB_CONFIG = Path(__file__).resolve().parent / 'config_no_noise.toml'
+MUNIT_REPO = Path('~/Development/Doctorate/MUNIT').expanduser()
+# bulk working storage (~/Extra), deliberately away from the curated ~/Vault data
+OUT_DIRS = {
+    'unsb': Path('~/Extra/Doctorate/synthetic/Shoemarks_UNSB/train'),
+    'gan': Path('~/Extra/Doctorate/synthetic/Shoemarks_GAN/train'),
+    'munit': Path('~/Extra/Doctorate/synthetic/Shoemarks_MUNIT/train'),
+}
+BATCH = 16
+
+
+def build_handler(backend, device, config=None):
+    if backend == 'unsb':
+        return GeneratorHandler(load_unsb_opt(config or UNSB_CONFIG), device)
+    if backend == 'munit':
+        # spec-loaded: the MUNIT repo's top-level data.py would collide with
+        # this repo's data package if its root joined sys.path
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'munit_handler', MUNIT_REPO / 'munit_handler.py')
+        munit = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(munit)
+        # munit configs carry their own checkpoint: key, so config is required
+        return munit.GeneratorHandler(munit.load_munit_config(config), device)
+    from one_to_many_gan import GeneratorHandler as GanHandler, load_gan_config
+    return GanHandler(load_gan_config(config or GAN_CONFIG), device)
+
+
+def get_id(path):
+    """Class id of a shoeprint file (the siamese datasets.get_id convention)."""
+    split = path.stem.split('_')
+    if len(split) == 3:
+        split = split[:-1]
+    return '_'.join(split)
+
+
+def save_mark(fake, out):
+    """Atomic save: resume-by-existence must never trust a half-written file."""
+    tmp = out.with_name(out.name + '.tmp')
+    torchvision.utils.save_image(fake * 0.5 + 0.5, tmp, format='png')
+    tmp.rename(out)
+
+
+def load_print(path):
+    img = Image.open(path).convert('L')
+    x = torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0)[None]
+    if x.shape[-2:] != (512, 256):
+        x = F.interpolate(x[None], (512, 256), mode='bicubic', align_corners=False,
+                          antialias=True)[0].clamp(0, 1)
+    return x
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--backend', choices=['unsb', 'gan', 'munit'], default='unsb')
+    parser.add_argument('--n-styles', type=int, required=True,
+                        help='marks generated per shoeprint class (from style_coverage.py)')
+    parser.add_argument('--out-dir', type=Path, default=None,
+                        help='default: Shoemarks_<BACKEND>/train next to the real shoemarks')
+    parser.add_argument('--difficulty', type=float, default=1.0,
+                        help="GAN domain variable; values below 1.0 write to <out-dir>_d<value> "
+                             "sibling trees for the pooled curriculum (gan backend only)")
+    parser.add_argument('--generator-config', type=Path, default=None,
+                        help="backend config overriding the built-in default (unsb: %s, so "
+                             "the stochastic-bridge ablations need config.toml); campaign "
+                             "rows point this at per-checkpoint configs" % UNSB_CONFIG.name)
+    parser.add_argument('--print-dir', type=Path, default=PRINT_DIR,
+                        help='shoeprint train directory (default: the local Vault path)')
+    parser.add_argument('--frozen-style', action='store_true',
+                        help='one seeded style per shoeprint class, reused for every render, '
+                             'so only trajectory noise varies (unsb backend only)')
+    args = parser.parse_args()
+    if args.difficulty != 1.0 and args.backend != 'gan':
+        parser.error('--difficulty only applies to the gan backend (UNSB ignores it)')
+    if args.frozen_style and args.backend != 'unsb':
+        parser.error('--frozen-style only applies to the unsb backend')
+    if args.backend == 'munit' and args.generator_config is None:
+        parser.error('the munit backend needs --generator-config (a training yaml '
+                     'with a checkpoint: key)')
+    out_root = (args.out_dir or OUT_DIRS[args.backend]).expanduser()
+    if args.difficulty != 1.0:
+        # matches the sibling-tree naming the siamese StreamingDataset discovers
+        out_root = out_root.with_name('%s_d%g' % (out_root.name, args.difficulty))
+
+    print_dir = args.print_dir.expanduser()
+    classes = defaultdict(list)
+    for f in sorted(print_dir.rglob('*.png')) + sorted(print_dir.rglob('*.jpg')):
+        classes[get_id(f)].append(f)
+    print('%d classes, %d marks each -> %d images -> %s'
+          % (len(classes), args.n_styles, len(classes) * args.n_styles, out_root))
+
+    # one flat work list, batched across classes for GPU efficiency
+    todo = []
+    for cid, prints in sorted(classes.items()):
+        for k in range(args.n_styles):
+            out = out_root / cid / ('%d.png' % k)
+            if not out.exists():
+                todo.append((prints[k % len(prints)], out))
+    print('%d images to generate (%d already on disk)'
+          % (len(todo), len(classes) * args.n_styles - len(todo)))
+    if not todo:
+        # a complete (e.g. transferred) pool needs no generator: don't require
+        # this run's checkpoint on the machine just to no-op over it
+        return
+
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    handler = build_handler(args.backend, device, args.generator_config)
+
+    # per-class styles drawn from their own generator in sorted-class order:
+    # stable across resumes regardless of which files already exist
+    styles = None
+    if args.frozen_style:
+        g = torch.Generator().manual_seed(0)
+        styles = {cid: torch.randn(handler.opt.style_dim, generator=g)
+                  for cid in sorted(classes)}
+
+    # preload every needed print into RAM (~0.8 GB for the full set): each one
+    # is reused ~N times, so decoding it once keeps the loop off the CPU
+    prints = {p: load_print(p) for p in
+              tqdm({p for p, _ in todo}, desc='loading prints', unit='img')}
+
+    torch.manual_seed(0)
+    # PNG encoding dominates the remaining CPU work: hand the saves to a small
+    # thread pool so generating the next batch overlaps with writing this one
+    with torch.no_grad(), ThreadPoolExecutor(max_workers=4) as saver:
+        for i in tqdm(range(0, len(todo), BATCH), desc='generating', unit='batch'):
+            chunk = todo[i:i + BATCH]
+            src = torch.stack([prints[p] for p, _ in chunk]).to(device)
+            z = (torch.stack([styles[out.parent.name] for _, out in chunk]).to(device)
+                 if styles else None)  # style=None: fresh style per image
+            fakes = handler.generate(src, style=z, difficulty=args.difficulty).cpu()
+            for fake, (_, out) in zip(fakes, chunk):
+                out.parent.mkdir(parents=True, exist_ok=True)
+                saver.submit(save_mark, fake, out)
+
+
+if __name__ == '__main__':
+    main()

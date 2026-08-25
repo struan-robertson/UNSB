@@ -1,0 +1,84 @@
+# Config for training and testing the model.
+#
+# Section names are organisational only — all keys are flattened onto the
+# options namespace — except [training] (used only by train.py) and [test]
+# (used only by test.py). Values here override the defaults in options/;
+# anything passed explicitly on the command line overrides this file.
+# Run with:  uv run train.py   /   uv run test.py
+
+[experiment]
+name = "shoeprint_unsb_v2" # v1 = 100-epoch run (best: epoch 55, FID 32.19); v2 tests a
+                           # short schedule decaying into the productive window
+checkpoints_dir = "./checkpoints"
+gpu_ids = "0" # e.g. "0", "0,1", "-1" for CPU
+
+[model]
+mode = "sb"
+style_dim = 6      # dimensionality of the style vector z
+n_mlp = 3          # layers in the style mapping network
+ngf = 64
+ndf = 64
+num_timesteps = 5  # NFE steps of the Schrödinger bridge
+input_nc = 1       # 3 for RGB, 1 for grayscale
+output_nc = 1
+
+[optimisation]
+lambda_GAN = 1.0
+lambda_NCE = 1.0
+lambda_SB = 0.1
+lambda_style = 5.0        # style cycle (latent regression) loss weight
+style_cos_l2_ratio = 0.2  # L2 term weight relative to cosine in the style cycle loss
+mapping_lr_ratio = 0.01   # mapping network LR relative to the generator (100x lower, as in one_to_many_gan)
+tau = 0.01                # SB entropy parameter: scales the bridge noise AND both SB loss
+                          # terms, so tau = 0 silently removes the SB loss as well
+bridge_noise = 0.0        # multiplier on the bridge noise alone; 0 gives a deterministic
+                          # bridge with the SB loss intact. Must match at train and test time
+
+[data]
+# two-directory layout shared with the one_to_many_gan project:
+# each dir contains train/, test/ and val/ subdirectories of images
+dataset_mode = "twodir"
+dir_A = "/home/struan/Vault/University/Doctorate/Data/GAN/Partitioned New/Compiled/Shoeprints"
+dir_B = "/home/struan/Vault/University/Doctorate/Data/GAN/Partitioned New/Compiled/Shoemarks"
+crop_size = 256    # image width after resize
+crop_size_h = 512  # image height after resize
+batch_size = 4
+
+[performance]
+mixed_precision = true # torch.amp autocast in bfloat16 (needs Ampere+ / RDNA3+)
+compile = true         # torch.compile the networks (first iterations are slow while kernels compile)
+
+[evaluation] # KID/FID via clean-fid (train-time hook and evaluate.py)
+n_evaluation_images = 10000 # translations generated per FID/KID computation
+cond_is_n_evaluation_images = 100 # style-varied translations per val shoeprint for the
+                                  # conditional inception score (evaluate.py only; 0 disables)
+use_training_data = true    # translate train A and score against all of train B, as the
+                            # GAN's test_kid_fid.py does (1526 train shoemarks; FID
+                            # against the 135-image val/ set is biased sharply upward)
+
+[training] # applied only by train.py
+seed = 0 # seeds weight init, data order and style/noise sampling (run comparability)
+diffaug_policy = "" # DiffAugment on discriminator inputs, comma-separated from
+                    # [color | translation | cutout]; "" disables. For the small-data
+                    # D-memorisation experiment use "color,translation,cutout"
+lr = 2e-4
+beta1 = 0.5
+beta2 = 0.999
+n_epochs = 60         # total training epochs
+n_epochs_decay = 30   # final epochs over which the learning rate decays to zero
+                      # (the first n_epochs - n_epochs_decay epochs run at the full rate)
+save_epoch_freq = 2   # dense saves: checkpoints are cheap, the post-hoc seeded sweep
+                      # (evaluate.py --epoch all) makes scoring them cheap too
+save_latest_freq = 5000
+print_freq = 100      # loss-log frequency (iterations)
+display_freq = 400    # sample-image-grid frequency (iterations)
+evaluation_freq = 10000 # KID/FID frequency (iterations); 0 disables the train-time hook
+no_train_eval = true    # skip the train-time FID/KID hook entirely; score the saved
+                        # checkpoints afterwards with evaluate.py --epoch all
+
+[test] # applied only by test.py (and inference via unsb_handler.py)
+phase = "test"
+epoch = "54" # which checkpoint to load: the full-model winner (seed 0, FID 32.45),
+             # used as the generator in the siamese pipeline
+results_dir = "./results/"
+num_test = 50

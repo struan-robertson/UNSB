@@ -52,6 +52,7 @@ class BaseOptions():
         parser.add_argument('--no_dropout', type=util.str2bool, nargs='?', const=True, default=True)
         parser.add_argument('--std', type=float, default=0.25, help='Scale of Gaussian noise added to data')
         parser.add_argument('--tau', type=float, default=0.01, help='Entropy parameter')
+        parser.add_argument('--bridge_noise', type=float, default=1.0, help='multiplier on the Gaussian noise injected at each bridge step, decoupled from tau (which also scales the SB loss); 0 makes the bridge deterministic while leaving the SB loss intact. Must match between training and inference')
         # performance parameters
         parser.add_argument('--mixed_precision', type=util.str2bool, nargs='?', const=True, default=False, help='run forward passes under torch.amp autocast in bfloat16 (needs a bf16-capable GPU: Ampere+ / RDNA3+)')
         parser.add_argument('--compile', type=util.str2bool, nargs='?', const=True, default=False, help='optimise the networks with torch.compile (the first iterations are slow while kernels compile)')
@@ -97,7 +98,13 @@ class BaseOptions():
         in model and dataset classes.
         """
         if not self.initialized:  # check if it has been initialized
-            parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+            # allow_abbrev=False because sb_model.modify_commandline_options calls
+            # parse_known_args() with no arguments, so this parser always reads
+            # sys.argv even when a cmd_line was supplied (as unsb_handler does).
+            # With abbreviation on, a flag belonging to a calling script is either
+            # absorbed as a prefix of a UNSB option or errors as ambiguous
+            parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                                             allow_abbrev=False)
             parser = self.initialize(parser)
 
         # load the TOML config (if any); its values override the built-in defaults,

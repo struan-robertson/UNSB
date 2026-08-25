@@ -1,0 +1,168 @@
+{
+  "shoeprint_unsb_v2_1": {
+    "epoch": "54",
+    "pca_cumulative_variance": [
+      0.6944037079811096,
+      0.8464332818984985,
+      0.9421722888946533,
+      0.9829263091087341,
+      0.9957262277603149,
+      0.9999999403953552
+    ],
+    "sign_structure": {
+      "p_positive_per_component": [
+        0.3265,
+        0.42325,
+        0.579,
+        0.4555,
+        0.57775,
+        0.503
+      ],
+      "p_positive_min": 0.3265,
+      "p_positive_max": 0.579,
+      "max_orthant_occupancy": 0.14575,
+      "orthants_occupied": 47,
+      "orthants_possible": 64,
+      "uniform_orthant_occupancy": 0.015625,
+      "mean_cosine_to_mean_direction": 0.40812933444976807,
+      "frac_positive_cosine": 0.916,
+      "participation_ratio": 2.0829107761383057,
+      "energy_top1": 0.7223693132400513,
+      "energy_top2": 0.9031569361686707,
+      "energy_top3": 0.9675736427307129,
+      "frac_exact_zeros": 0.0
+    },
+    "norm_intensity_spearman": 0.11198006261100812,
+    "smoothness": {
+      "s": {
+        "morans_intensity": 0.9016649127006531,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.9065893888473511,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.5154036128613512,
+        "knn_coherence": 7.379797458648682
+      },
+      "w": {
+        "morans_intensity": 0.7161429524421692,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.7176825404167175,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.22699158787063173,
+        "knn_coherence": 2.1624081134796143
+      }
+    },
+    "real_overlay": {
+      "n_real": 135,
+      "pc12_explained_variance": 0.8464332818984985,
+      "frac_real_inside_sampled_pc_range": 1.0,
+      "real_mean_norm": 0.15915481746196747,
+      "sampled_mean_norm": 0.46903932094573975
+    }
+  },
+  "shoeprint_unsb_v2_2": {
+    "epoch": "44",
+    "pca_cumulative_variance": [
+      0.747531533241272,
+      0.9704436659812927,
+      0.9962080717086792,
+      0.9988328218460083,
+      0.999550998210907,
+      0.9999998807907104
+    ],
+    "sign_structure": {
+      "p_positive_per_component": [
+        0.18325,
+        0.73125,
+        0.868,
+        0.961,
+        1.0,
+        0.98925
+      ],
+      "p_positive_min": 0.18325,
+      "p_positive_max": 1.0,
+      "max_orthant_occupancy": 0.61675,
+      "orthants_occupied": 15,
+      "orthants_possible": 64,
+      "uniform_orthant_occupancy": 0.015625,
+      "mean_cosine_to_mean_direction": 0.8859354257583618,
+      "frac_positive_cosine": 0.99675,
+      "participation_ratio": 2.840373992919922,
+      "energy_top1": 0.46440979838371277,
+      "energy_top2": 0.7509169578552246,
+      "energy_top3": 0.9278937578201294,
+      "frac_exact_zeros": 0.0
+    },
+    "norm_intensity_spearman": 0.679365053791816,
+    "smoothness": {
+      "s": {
+        "morans_intensity": 0.9060207605361938,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.9345898032188416,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.762859276423132,
+        "knn_coherence": 8.9369535446167
+      },
+      "w": {
+        "morans_intensity": 0.4890548884868622,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.652704119682312,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.20111867528640248,
+        "knn_coherence": 2.1595678329467773
+      }
+    }
+  },
+  "shoeprint_unsb_v2_3": {
+    "epoch": "36",
+    "pca_cumulative_variance": [
+      0.7908652424812317,
+      0.9512478113174438,
+      0.9818441867828369,
+      0.9921257495880127,
+      0.9971926808357239,
+      0.9999999403953552
+    ],
+    "sign_structure": {
+      "p_positive_per_component": [
+        0.3015,
+        0.71775,
+        0.519,
+        0.74975,
+        0.18475,
+        0.515
+      ],
+      "p_positive_min": 0.18475,
+      "p_positive_max": 0.74975,
+      "max_orthant_occupancy": 0.19825,
+      "orthants_occupied": 49,
+      "orthants_possible": 64,
+      "uniform_orthant_occupancy": 0.015625,
+      "mean_cosine_to_mean_direction": 0.635627269744873,
+      "frac_positive_cosine": 0.98425,
+      "participation_ratio": 1.9870363473892212,
+      "energy_top1": 0.5956934094429016,
+      "energy_top2": 0.8689678311347961,
+      "energy_top3": 0.9658388495445251,
+      "frac_exact_zeros": 0.0
+    },
+    "norm_intensity_spearman": 0.8289782471617977,
+    "smoothness": {
+      "s": {
+        "morans_intensity": 0.934815526008606,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.9487529397010803,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.893119666772353,
+        "knn_coherence": 11.105263710021973
+      },
+      "w": {
+        "morans_intensity": 0.7192493677139282,
+        "morans_intensity_p": 0.001,
+        "morans_contrast": 0.7664450407028198,
+        "morans_contrast_p": 0.001,
+        "spearman_lpips": 0.24270653681505058,
+        "knn_coherence": 2.290811538696289
+      }
+    }
+  }
+}

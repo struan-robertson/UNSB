@@ -5,6 +5,7 @@ from .base_model import BaseModel
 from . import networks
 from .patchnce import PatchNCELoss
 import util.util as util
+from util.diffaug import diff_augment
 
 class SBModel(BaseModel):
     @staticmethod
@@ -43,7 +44,7 @@ class SBModel(BaseModel):
         elif opt.mode.lower() == "fastcut":
             parser.set_defaults(
                 nce_idt=False, lambda_NCE=10.0, flip_equivariance=True,
-                n_epochs=150, n_epochs_decay=50
+                n_epochs=200, n_epochs_decay=50
             )
         else:
             raise ValueError(opt.mode)
@@ -161,14 +162,16 @@ class SBModel(BaseModel):
 
         self.optimizer_G.zero_grad()
         self.optimizer_SE.zero_grad()
-        if self.opt.netF == 'mlp_sample':
+        # optimizer_F only exists when the NCE loss is active (netF's weights are
+        # created lazily by the first NCE forward pass)
+        if self.opt.netF == 'mlp_sample' and self.opt.lambda_NCE > 0.0:
             self.optimizer_F.zero_grad()
         with self.autocast():
             self.loss_G = self.compute_G_loss()
         self.loss_G.backward()
         self.optimizer_G.step()
         self.optimizer_SE.step()
-        if self.opt.netF == 'mlp_sample':
+        if self.opt.netF == 'mlp_sample' and self.opt.lambda_NCE > 0.0:
             self.optimizer_F.step()
         
     def set_input(self, input,input2=None):
@@ -188,8 +191,12 @@ class SBModel(BaseModel):
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
-        
+
         tau = self.opt.tau
+        # tau scales both the bridge noise and the SB loss; bridge_noise scales the
+        # noise alone, so --bridge_noise 0 gives a deterministic bridge with the SB
+        # loss untouched (the confound the other way round would be --tau 0)
+        noise = self.opt.bridge_noise
         T = self.opt.num_timesteps
         incs = np.array([0] + [1/(i+1) for i in range(T-1)])
         times = np.cumsum(incs)
@@ -227,19 +234,19 @@ class SBModel(BaseModel):
                     denom = times[-1] - times[t-1]
                     inter = (delta / denom).reshape(-1,1,1,1)
                     scale = (delta * (1 - delta / denom)).reshape(-1,1,1,1)
-                Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
+                Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
                 Xt_1     = self.netG(Xt, time_idx, self.style, style_is_mapped=True)
 
-                Xt2       = self.real_A2 if (t == 0) else (1-inter) * Xt2 + inter * Xt_12.detach() + (scale * tau).sqrt() * torch.randn_like(Xt2).to(self.real_A.device)
+                Xt2       = self.real_A2 if (t == 0) else (1-inter) * Xt2 + inter * Xt_12.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt2).to(self.real_A.device)
                 time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                 time     = times[time_idx]
                 Xt_12    = self.netG(Xt2, time_idx, style2, style_is_mapped=True)
 
 
                 if self.opt.nce_idt:
-                    XtB = self.real_B if (t == 0) else (1-inter) * XtB + inter * Xt_1B.detach() + (scale * tau).sqrt() * torch.randn_like(XtB).to(self.real_A.device)
+                    XtB = self.real_B if (t == 0) else (1-inter) * XtB + inter * Xt_1B.detach() + noise * (scale * tau).sqrt() * torch.randn_like(XtB).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
                     Xt_1B = self.netG(XtB, time_idx, styleB, style_is_mapped=True)
@@ -270,6 +277,7 @@ class SBModel(BaseModel):
             
         if self.opt.phase == 'test':
             tau = self.opt.tau
+            noise = self.opt.bridge_noise
             T = self.opt.num_timesteps
             incs = np.array([0] + [1/(i+1) for i in range(T-1)])
             times = np.cumsum(incs)
@@ -304,7 +312,7 @@ class SBModel(BaseModel):
                         denom = times[-1] - times[t-1]
                         inter = (delta / denom).reshape(-1,1,1,1)
                         scale = (delta * (1 - delta / denom)).reshape(-1,1,1,1)
-                    Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
+                    Xt       = self.real_A if (t == 0) else (1-inter) * Xt + inter * Xt_1.detach() + noise * (scale * tau).sqrt() * torch.randn_like(Xt).to(self.real_A.device)
                     time_idx = (t * torch.ones(size=[self.real_A.shape[0]]).to(self.real_A.device)).long()
                     time     = times[time_idx]
                     Xt_1     = self.netG(Xt, time_idx, z, style_is_mapped=True)
@@ -323,9 +331,9 @@ class SBModel(BaseModel):
         fake = self.fake_B.detach()
         std = torch.rand(size=[1]).item() * self.opt.std
         
-        pred_fake = self.netD(fake,self.time_idx)
+        pred_fake = self.netD(diff_augment(fake, self.opt.diffaug_policy), self.time_idx)
         self.loss_D_fake = self.criterionGAN(pred_fake, False).mean()
-        self.pred_real = self.netD(self.real_B,self.time_idx)
+        self.pred_real = self.netD(diff_augment(self.real_B, self.opt.diffaug_policy), self.time_idx)
         loss_D_real = self.criterionGAN(self.pred_real, True)
         self.loss_D_real = loss_D_real.mean()
         
@@ -352,7 +360,7 @@ class SBModel(BaseModel):
         std = torch.rand(size=[1]).item() * self.opt.std
         
         if self.opt.lambda_GAN > 0.0:
-            pred_fake = self.netD(fake,self.time_idx)
+            pred_fake = self.netD(diff_augment(fake, self.opt.diffaug_policy), self.time_idx)
             self.loss_G_GAN = self.criterionGAN(pred_fake, True).mean() * self.opt.lambda_GAN
         else:
             self.loss_G_GAN = 0.0
@@ -375,6 +383,7 @@ class SBModel(BaseModel):
             self.loss_NCE_Y = self.calculate_NCE_loss(self.real_B, self.idt_B)
             loss_NCE_both = (self.loss_NCE + self.loss_NCE_Y) * 0.5
         else:
+            self.loss_NCE_Y = 0.0
             loss_NCE_both = self.loss_NCE
 
         if self.opt.lambda_style > 0.0:

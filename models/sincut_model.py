@@ -41,7 +41,7 @@ class SinCUTModel(CUTModel):
                                 batch_size=16,
                                 save_epoch_freq=1,
                                 save_latest_freq=20000,
-                                n_epochs=8,
+                                n_epochs=16,
                                 n_epochs_decay=8,
 
             )

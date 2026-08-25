@@ -5,12 +5,14 @@ Generates n_evaluation_images translations from the domain-A validation images
 domain-B directory, then computes the conditional inception score (per-input
 diversity), mirroring the evaluation of the one_to_many_gan project. The style
 and bridge-noise sampling is seeded, so scores are directly comparable across
-checkpoints. --epoch all sweeps every numbered checkpoint in ascending order.
+checkpoints. --epoch all sweeps every numbered checkpoint in ascending order;
+--epoch 55-100 restricts the sweep to that inclusive epoch range.
 
 Example:
     python evaluate.py --config config.toml
     python evaluate.py --config config.toml --epoch 200 --n_evaluation_images 10000
     python evaluate.py --config config.toml --epoch all
+    python evaluate.py --config config.toml --epoch 55-100
 """
 import os
 import re
@@ -64,10 +66,14 @@ def main():
     opt.no_flip = True
 
     epochs = [opt.epoch]
-    if opt.epoch == 'all':
+    if opt.epoch == 'all' or re.fullmatch(r'\d+-\d+', opt.epoch):
         epochs = list_epochs(opt)
+        if opt.epoch != 'all':
+            lo, hi = map(int, opt.epoch.split('-'))
+            epochs = [e for e in epochs if lo <= e <= hi]
         if not epochs:
-            raise SystemExit('no numbered checkpoints found in %s/%s' % (opt.checkpoints_dir, opt.name))
+            raise SystemExit('no numbered checkpoints matching --epoch %s in %s/%s'
+                             % (opt.epoch, opt.checkpoints_dir, opt.name))
         print('evaluating %d checkpoints: %s' % (len(epochs), epochs))
         opt.epoch = str(epochs[0])  # setup() below loads the first one
 

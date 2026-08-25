@@ -270,7 +270,7 @@ class BaseModel(ABC):
                 scheduler.load_state_dict(sched_state)
                 # re-derive the group LRs from the restored epoch position rather than
                 # keeping the saved values, so a changed schedule (e.g. extending
-                # n_epochs_decay to train a finished run further) takes effect immediately
+                # n_epochs to train a finished run further) takes effect immediately
                 if hasattr(scheduler, 'lr_lambdas'):
                     for group, lr_lambda in zip(scheduler.optimizer.param_groups, scheduler.lr_lambdas):
                         group['lr'] = group['initial_lr'] * lr_lambda(scheduler.last_epoch)
