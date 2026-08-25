@@ -16,6 +16,14 @@ uv sync --extra cuda
 uv sync --extra rocm
 ```
 
+Because torch comes from an extra, pass the same one when running, otherwise
+`uv run` resolves an environment without it:
+
+```sh
+uv run --extra cuda python ...
+uv run --no-sync python ...   # use the environment as it stands
+```
+
 ## Configuration
 
 Options resolve as defaults, then a TOML configuration file, then command-line
