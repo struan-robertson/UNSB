@@ -199,7 +199,7 @@ wheels = [
 [[package]]
 name = "impression-tools"
 version = "0.1.0"
-source = { editable = "../../impression_tools" }
+source = { git = "https://github.com/struan-robertson/impression-tools.git?rev=b9c13a8042477e4feab51a027a728a858ce3bc0b#b9c13a8042477e4feab51a027a728a858ce3bc0b" }
 dependencies = [
     { name = "clean-fid" },
     { name = "numpy" },
@@ -208,23 +208,6 @@ dependencies = [
     { name = "scipy" },
     { name = "tqdm" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "clean-fid", specifier = "==0.1.35" },
-    { name = "numpy", specifier = ">=2.2.3" },
-    { name = "pillow", specifier = ">=11.1.0" },
-    { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", specifier = ">=3.5.1", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "impression-tools", extra = "rocm" } },
-    { name = "scikit-learn", specifier = ">=1.9.0" },
-    { name = "scipy", specifier = "<1.17" },
-    { name = "torch", marker = "extra == 'cuda'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "impression-tools", extra = "cuda" } },
-    { name = "torch", marker = "extra == 'rocm'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "impression-tools", extra = "rocm" } },
-    { name = "torchvision", marker = "extra == 'cuda'", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "impression-tools", extra = "cuda" } },
-    { name = "torchvision", marker = "extra == 'rocm'", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "impression-tools", extra = "rocm" } },
-    { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", specifier = ">=3.6.0", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "impression-tools", extra = "rocm" } },
-]
-provides-extras = ["cuda", "rocm"]
 
 [[package]]
 name = "jinja2"
@@ -959,7 +942,7 @@ rocm = [
 [package.metadata]
 requires-dist = [
     { name = "clean-fid", specifier = "==0.1.35" },
-    { name = "impression-tools", editable = "../../impression_tools" },
+    { name = "impression-tools", git = "https://github.com/struan-robertson/impression-tools.git?rev=b9c13a8042477e4feab51a027a728a858ce3bc0b" },
     { name = "numpy", specifier = ">=2.2.3" },
     { name = "pillow", specifier = ">=9.1" },
     { name = "pytorch-triton-rocm", marker = "sys_platform == 'linux' and extra == 'rocm'", specifier = ">=3.5.1", index = "https://download.pytorch.org/whl/rocm7.2", conflict = { package = "unsb", extra = "rocm" } },

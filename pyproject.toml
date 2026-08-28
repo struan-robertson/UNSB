@@ -44,7 +44,10 @@ torchvision = [
 ]
 pytorch-triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
 triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
-impression-tools = { path = "../../impression_tools", editable = true }
+# Fetched and pinned in the lock rather than read from a sibling checkout, so
+# the repo builds anywhere. To edit it alongside this project, install it over
+# the top for the session: uv pip install -e ../../impression_tools
+impression-tools = { git = "https://github.com/struan-robertson/impression-tools.git", rev = "b9c13a8042477e4feab51a027a728a858ce3bc0b" }
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
