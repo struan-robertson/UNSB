@@ -51,7 +51,9 @@ impression-tools = { git = "https://github.com/struan-robertson/impression-tools
 
 [[tool.uv.index]]
 name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu130"
+# CUDA 12: the A40 host runs a driver too old for the CUDA 13 wheels,
+# which need 580 or newer. The 12.x wheels run on anything from 525.
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [[tool.uv.index]]
